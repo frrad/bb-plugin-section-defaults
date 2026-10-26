@@ -1,9 +1,10 @@
 // bb-plugin-section-defaults — backend entry.
 //
-// Stores one preset per sidebar section in bb.storage.kv and serves it to the
-// settings page and composer banner (app.tsx, over RPC) and to the
-// `bb section-defaults` CLI. Every write publishes a realtime signal so open
-// windows pick it up.
+// Stores two things per sidebar section in bb.storage.kv: the configured model
+// choices, and the settings last used to start a thread from that section
+// (project, environment, model). Serves both to the settings page and
+// composer banner (app.tsx, over RPC) and to the `bb section-defaults` CLI.
+// Every write publishes a realtime signal so open windows pick it up.
 import { PluginCliError, cliCommand, defineCli, defineRpcContract } from "@get-bb/plugin-sdk";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -20,22 +21,58 @@ const choiceSchema = z.object({
 });
 const presetSchema = z.object({ choices: z.array(choiceSchema).max(20) });
 const configSchema = z.record(z.string(), presetSchema);
+const rememberedSchema = z.object({
+  projectId: z.string().min(1).optional(),
+  // bb's CreateThreadEnvironmentArgs; passed back to the composer untouched.
+  environment: z.json().optional(),
+  providerId: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  reasoningLevel: z.string().min(1).optional(),
+  serviceTier: z.string().min(1).optional(),
+  permissionMode: z.enum(PERMISSION_MODES).optional(),
+});
+const rememberedConfigSchema = z.record(z.string(), rememberedSchema);
+type Remembered = z.infer<typeof rememberedSchema>;
+type RememberedConfig = z.infer<typeof rememberedConfigSchema>;
 const sectionSchema = z.object({ id: z.string(), name: z.string() });
 
 export const rpcContract = defineRpcContract({
   presets_get: {
     input: z.null(),
-    output: z.object({ sections: z.array(sectionSchema), presets: configSchema }),
+    output: z.object({
+      sections: z.array(sectionSchema),
+      projects: z.array(sectionSchema),
+      presets: configSchema,
+      remembered: rememberedConfigSchema,
+      rememberEnabled: z.boolean(),
+    }),
   },
   presets_set: {
     input: z.object({ sectionId: z.string().min(1), preset: presetSchema.nullable() }),
     output: z.object({ presets: configSchema }),
   },
+  remembered_set: {
+    input: z.object({ sectionId: z.string().min(1), remembered: rememberedSchema.nullable() }),
+    output: z.object({ remembered: rememberedConfigSchema }),
+  },
 });
 
 const STORAGE_KEY = "presets";
+const REMEMBERED_KEY = "remembered";
 
 export default async function plugin(bb: BbPluginApi): Promise<void> {
+  const settings = bb.settings.define({
+    rememberLastUsed: {
+      type: "boolean",
+      label: "Remember last-used settings per section",
+      description:
+        "Start each section's new threads in the project, workspace, and model last used from that section. " +
+        "Model choices configured below still take priority for the model.",
+      default: true,
+    },
+  });
+  settings.onChange(() => bb.realtime.publish(PRESETS_CHANGED, { sectionId: null }));
+
   async function readPresets(): Promise<PresetConfig> {
     const parsed = configSchema.safeParse(await bb.storage.kv.get(STORAGE_KEY));
     return parsed.success ? parsed.data : {};
@@ -48,6 +85,20 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     await bb.storage.kv.set(STORAGE_KEY, presets);
     bb.realtime.publish(PRESETS_CHANGED, { sectionId });
     return presets;
+  }
+
+  async function readRemembered(): Promise<RememberedConfig> {
+    const parsed = rememberedConfigSchema.safeParse(await bb.storage.kv.get(REMEMBERED_KEY));
+    return parsed.success ? parsed.data : {};
+  }
+
+  async function writeRemembered(sectionId: string, remembered: Remembered | null): Promise<RememberedConfig> {
+    const all = await readRemembered();
+    if (remembered === null) delete all[sectionId];
+    else all[sectionId] = remembered;
+    await bb.storage.kv.set(REMEMBERED_KEY, all);
+    bb.realtime.publish(PRESETS_CHANGED, { sectionId });
+    return all;
   }
 
   async function listSections(): Promise<{ id: string; name: string }[]> {
@@ -72,14 +123,42 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   }
 
   bb.rpc.register(rpcContract, {
-    presets_get: async () => ({ sections: await listSections(), presets: await readPresets() }),
+    presets_get: async () => ({
+      sections: await listSections(),
+      projects: (await bb.sdk.projects.list()).map(({ id, name }) => ({ id, name })),
+      presets: await readPresets(),
+      remembered: await readRemembered(),
+      rememberEnabled: (await settings.get()).rememberLastUsed,
+    }),
     presets_set: async ({ sectionId, preset }) => ({ presets: await writePreset(sectionId, preset) }),
+    remembered_set: async ({ sectionId, remembered }) => {
+      if (remembered !== null && !(await settings.get()).rememberLastUsed) return { remembered: await readRemembered() };
+      return { remembered: await writeRemembered(sectionId, remembered) };
+    },
   });
 
-  function formatPreset(name: string, id: string, preset: SectionPreset | undefined): string {
-    const header = `${name} (${id})`;
-    if (preset === undefined) return `${header}\n  (bb defaults)`;
-    return [header, ...preset.choices.map((choice) => `  ${formatOptionSpec(choice)}`)].join("\n");
+  function formatRemembered(remembered: Remembered): string {
+    const parts = [
+      remembered.projectId === undefined ? null : `project=${remembered.projectId}`,
+      remembered.environment === undefined ? null : `environment=${JSON.stringify(remembered.environment)}`,
+      remembered.model === undefined ? null : `model=${remembered.providerId ?? "?"}/${remembered.model}`,
+      remembered.reasoningLevel === undefined ? null : `reasoning=${remembered.reasoningLevel}`,
+      remembered.permissionMode === undefined ? null : `permission=${remembered.permissionMode}`,
+    ];
+    return parts.filter((part): part is string => part !== null).join(" ");
+  }
+
+  function formatSection(
+    name: string,
+    id: string,
+    preset: SectionPreset | undefined,
+    remembered: Remembered | undefined,
+  ): string {
+    const lines = [`${name} (${id})`];
+    if (preset === undefined) lines.push("  choices: (none; bb picks the model)");
+    else lines.push("  choices:", ...preset.choices.map((choice) => `    ${formatOptionSpec(choice)}`));
+    if (remembered !== undefined) lines.push(`  last used: ${formatRemembered(remembered)}`);
+    return lines.join("\n");
   }
 
   bb.cli.register(
@@ -88,26 +167,41 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       summary: "Per-section defaults for new threads, with weighted random model choice",
       commands: {
         list: cliCommand({
-          summary: "Show each section's preset",
+          summary: "Show each section's model choices and last-used settings",
           options: {
-            all: { type: "boolean", description: "Include sections that have no preset" },
+            all: { type: "boolean", description: "Include sections with nothing configured or remembered" },
             json: { type: "boolean", description: "Emit machine-readable JSON" },
           },
           async run(input) {
-            const [sections, presets] = await Promise.all([listSections(), readPresets()]);
-            const shown = sections.filter((section) => input.options.all || presets[section.id] !== undefined);
+            const [sections, presets, remembered] = await Promise.all([
+              listSections(),
+              readPresets(),
+              readRemembered(),
+            ]);
+            const shown = sections.filter(
+              (section) =>
+                input.options.all || presets[section.id] !== undefined || remembered[section.id] !== undefined,
+            );
             if (input.options.json) {
               return {
                 exitCode: 0,
-                stdout: JSON.stringify(shown.map((section) => ({ ...section, preset: presets[section.id] ?? null }))),
+                stdout: JSON.stringify(
+                  shown.map((section) => ({
+                    ...section,
+                    preset: presets[section.id] ?? null,
+                    remembered: remembered[section.id] ?? null,
+                  })),
+                ),
               };
             }
             if (shown.length === 0) {
-              return { exitCode: 0, stdout: "No section presets. Add one with `bb section-defaults set`." };
+              return { exitCode: 0, stdout: "Nothing configured or remembered yet. Add choices with `bb section-defaults set`." };
             }
             return {
               exitCode: 0,
-              stdout: shown.map((section) => formatPreset(section.name, section.id, presets[section.id])).join("\n\n"),
+              stdout: shown
+                .map((section) => formatSection(section.name, section.id, presets[section.id], remembered[section.id]))
+                .join("\n\n"),
             };
           },
         }),
@@ -144,17 +238,26 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
               exitCode: 0,
               stdout: input.options.json
                 ? JSON.stringify({ ...section, preset })
-                : formatPreset(section.name, section.id, preset),
+                : formatSection(section.name, section.id, preset, (await readRemembered())[section.id]),
             };
           },
         }),
         clear: cliCommand({
-          summary: "Remove a section's preset so it uses bb's defaults again",
+          summary: "Remove a section's model choices (the remembered settings stay)",
           positionals: [{ name: "section", description: "Section id or name", required: true }],
           async run(input) {
             const section = await resolveSection(input.positionals.section);
             await writePreset(section.id, null);
             return { exitCode: 0, stdout: `Cleared ${section.name} (${section.id})` };
+          },
+        }),
+        forget: cliCommand({
+          summary: "Forget a section's last-used project, workspace, and model",
+          positionals: [{ name: "section", description: "Section id or name", required: true }],
+          async run(input) {
+            const section = await resolveSection(input.positionals.section);
+            await writeRemembered(section.id, null);
+            return { exitCode: 0, stdout: `Forgot last-used settings for ${section.name} (${section.id})` };
           },
         }),
       },

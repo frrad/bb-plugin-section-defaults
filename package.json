@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-section-defaults",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "engines": {
     "bb": ">=0.47",
@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "Section Defaults",
-    "description": "Per-section defaults for the sidebar's new-thread buttons, including a weighted random pick between models (each with its own reasoning level).",
+    "description": "Per-section defaults for the sidebar's new-thread buttons: the last-used project, workspace, branch, and model, plus an optional weighted random pick between models.",
     "branding": {
       "icon": "./assets/shuffle.svg",
       "experimental_icons": {
@@ -53,7 +53,7 @@
     "vaul": "^1.1.2"
   },
   "scripts": {
-    "test": "node --test presets.test.ts placement.test.ts",
+    "test": "node --test presets.test.ts placement.test.ts worktree-branch.test.ts",
     "typecheck": "tsc"
   }
 }

@@ -29,6 +29,8 @@
     "presets.test.ts",
     "placement.ts",
     "placement.test.ts",
+    "worktree-branch.ts",
+    "worktree-branch.test.ts",
     "components",
     "lib",
     "hooks"

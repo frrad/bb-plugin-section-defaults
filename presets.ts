@@ -26,6 +26,76 @@ export interface SectionPreset {
 /** Section id → preset. Sections without an entry keep bb's own defaults. */
 export type PresetConfig = Record<string, SectionPreset>;
 
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+/**
+ * What the new-thread composer last submitted from a section: project,
+ * environment (bb's `CreateThreadEnvironmentArgs`, kept opaque), and model
+ * settings. Restored the next time that section's `+` is pressed.
+ */
+export interface Remembered {
+  projectId?: string;
+  environment?: Json;
+  providerId?: string;
+  model?: string;
+  reasoningLevel?: string;
+  serviceTier?: string;
+  permissionMode?: PermissionMode;
+}
+
+/** Section id → last-used settings. */
+export type RememberedConfig = Record<string, Remembered>;
+
+/** The fields of `setSelection` this plugin fills in. */
+export interface SelectionPatch {
+  projectId?: string;
+  environment?: unknown;
+  providerId?: string;
+  model?: string;
+  reasoningLevel?: string;
+  serviceTier?: string;
+  permissionMode?: PermissionMode;
+}
+
+function isReusedEnvironment(environment: unknown): boolean {
+  return typeof environment === "object" && environment !== null && "type" in environment &&
+    environment.type === "reuse";
+}
+
+/**
+ * Combines a section's remembered settings with a rolled model choice. The
+ * choice wins for provider, model, reasoning, and tier; permission falls back
+ * to the remembered one. A reused environment is never restored: it pins the
+ * thread to one old worktree.
+ */
+export function buildSelection(
+  remembered: Remembered | undefined,
+  choice: PresetChoice | null,
+): SelectionPatch | null {
+  const patch: SelectionPatch = {};
+  if (remembered !== undefined) {
+    if (remembered.projectId !== undefined) patch.projectId = remembered.projectId;
+    if (remembered.environment !== undefined && !isReusedEnvironment(remembered.environment)) {
+      patch.environment = remembered.environment;
+    }
+    if (choice === null) {
+      if (remembered.providerId !== undefined) patch.providerId = remembered.providerId;
+      if (remembered.model !== undefined) patch.model = remembered.model;
+      if (remembered.reasoningLevel !== undefined) patch.reasoningLevel = remembered.reasoningLevel;
+      if (remembered.serviceTier !== undefined) patch.serviceTier = remembered.serviceTier;
+    }
+    if (remembered.permissionMode !== undefined) patch.permissionMode = remembered.permissionMode;
+  }
+  if (choice !== null) {
+    patch.providerId = choice.providerId;
+    patch.model = choice.model;
+    if (choice.reasoningLevel !== undefined) patch.reasoningLevel = choice.reasoningLevel;
+    if (choice.serviceTier !== undefined) patch.serviceTier = choice.serviceTier;
+    if (choice.permissionMode !== undefined) patch.permissionMode = choice.permissionMode;
+  }
+  return Object.keys(patch).length === 0 ? null : patch;
+}
+
 /** Weighted random pick. `random` returns a number in [0, 1). */
 export function pickChoice(
   choices: readonly PresetChoice[],

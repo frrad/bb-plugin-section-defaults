@@ -3,13 +3,14 @@
 // Two surfaces:
 //
 // - A banner on the new-thread composer. When the screen was opened from a
-//   sidebar section's `+` button and that section has a preset, it picks one
-//   of the preset's choices (weighted at random) and sets the composer's
-//   provider, model, reasoning, tier, and permission pickers to it. The banner
-//   says what it picked and can re-roll. See placement.ts for how the section
-//   is detected.
+//   sidebar section's `+` button, it restores the project, workspace, and
+//   model last used from that section, then, if the section has model
+//   choices, picks one (weighted at random) for the model. The banner says
+//   what it did and can re-roll. Sending from the composer records the
+//   settings for next time. See placement.ts for how the section is detected.
 // - A settings page (Settings → Section Defaults) that edits each section's
-//   choices with bb's own provider/model and permission pickers.
+//   choices with bb's own provider/model and permission pickers and shows
+//   what each section remembers.
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
@@ -22,8 +23,17 @@ import {
 import type { ComposerSelection } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import { readNavigationKey, readPlacementSectionId } from "./placement.ts";
-import { PRESETS_CHANGED, choiceOdds, describeChoice, pickChoice } from "./presets.ts";
-import type { PresetChoice, PresetConfig, SectionPreset } from "./presets.ts";
+import { selectWorktreeBranch, worktreeBranch } from "./worktree-branch.ts";
+import { PRESETS_CHANGED, buildSelection, choiceOdds, describeChoice, pickChoice } from "./presets.ts";
+import type {
+  Json,
+  PresetChoice,
+  PresetConfig,
+  Remembered,
+  RememberedConfig,
+  SectionPreset,
+  SelectionPatch,
+} from "./presets.ts";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
@@ -40,13 +50,20 @@ interface Section {
 
 function usePresets(): {
   sections: Section[];
+  projects: Section[];
   presets: PresetConfig | null;
+  remembered: RememberedConfig;
+  rememberEnabled: boolean;
   save: (sectionId: string, preset: SectionPreset | null) => Promise<void>;
+  saveRemembered: (sectionId: string, remembered: Remembered | null) => Promise<void>;
   error: string | null;
 } {
   const rpc = useRpc<typeof rpcContract>();
   const [sections, setSections] = useState<Section[]>([]);
+  const [projects, setProjects] = useState<Section[]>([]);
   const [presets, setPresets] = useState<PresetConfig | null>(null);
+  const [remembered, setRemembered] = useState<RememberedConfig>({});
+  const [rememberEnabled, setRememberEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const report = useCallback((cause: unknown) => {
     setError(cause instanceof Error ? cause.message : String(cause));
@@ -54,7 +71,10 @@ function usePresets(): {
   const refetch = useCallback(() => {
     rpc.call("presets_get").then((result) => {
       setSections(result.sections);
+      setProjects(result.projects);
       setPresets(result.presets);
+      setRemembered(result.remembered);
+      setRememberEnabled(result.rememberEnabled);
       setError(null);
     }, report);
   }, [rpc, report]);
@@ -79,7 +99,18 @@ function usePresets(): {
     },
     [rpc, report, refetch],
   );
-  return { sections, presets, save, error };
+  const saveRemembered = useCallback(
+    async (sectionId: string, next: Remembered | null) => {
+      try {
+        const result = await rpc.call("remembered_set", { sectionId, remembered: next });
+        setRemembered(result.remembered);
+      } catch (cause) {
+        report(cause);
+      }
+    },
+    [rpc, report],
+  );
+  return { sections, projects, presets, remembered, rememberEnabled, save, saveRemembered, error };
 }
 
 // --- Composer banner -------------------------------------------------------
@@ -87,7 +118,10 @@ function usePresets(): {
 interface Applied {
   token: string;
   sectionId: string;
-  choice: PresetChoice;
+  /** The rolled model choice, or null when the section has none. */
+  choice: PresetChoice | null;
+  /** Whether last-used settings were restored. */
+  restored: boolean;
 }
 
 function readApplied(): Applied | null {
@@ -99,45 +133,67 @@ function readApplied(): Applied | null {
   }
 }
 
-function toSelection(choice: PresetChoice): ComposerSelection {
-  const selection: ComposerSelection = { providerId: choice.providerId, model: choice.model };
-  if (choice.reasoningLevel !== undefined) selection.reasoningLevel = choice.reasoningLevel;
-  if (choice.serviceTier !== undefined) selection.serviceTier = choice.serviceTier;
-  if (choice.permissionMode !== undefined) selection.permissionMode = choice.permissionMode;
-  return selection;
+function toSelection(patch: SelectionPatch): ComposerSelection {
+  return patch as ComposerSelection;
+}
+
+/** The parts of the composer's selection worth restoring next time. */
+function toRemembered(selection: ComposerSelection): Remembered {
+  const remembered: Remembered = {};
+  if (selection.projectId !== undefined) remembered.projectId = selection.projectId;
+  if (selection.environment !== undefined && selection.environment.type !== "reuse") {
+    // A plain JSON object; bb validates it again when it is restored.
+    remembered.environment = JSON.parse(JSON.stringify(selection.environment)) as Json;
+  }
+  if (selection.providerId !== undefined) remembered.providerId = selection.providerId;
+  if (selection.model !== undefined) remembered.model = selection.model;
+  if (selection.reasoningLevel !== undefined) remembered.reasoningLevel = selection.reasoningLevel;
+  if (selection.serviceTier !== undefined) remembered.serviceTier = selection.serviceTier;
+  if (selection.permissionMode !== undefined) remembered.permissionMode = selection.permissionMode;
+  return remembered;
 }
 
 function SectionPresetBanner() {
   const composer = useComposer();
-  const { sections, presets } = usePresets();
+  const { sections, presets, remembered, rememberEnabled, saveRemembered } = usePresets();
   const [applied, setApplied] = useState<Applied | null>(readApplied);
   const [sectionId, setSectionId] = useState<string | null>(null);
-  const presetsRef = useRef(presets);
-  presetsRef.current = presets;
+  const latest = useRef({ presets, remembered, rememberEnabled, selection: composer.selection });
+  latest.current = { presets, remembered, rememberEnabled, selection: composer.selection };
 
   const apply = useCallback(
-    (token: string, targetSectionId: string, choice: PresetChoice) => {
-      const next: Applied = { token, sectionId: targetSectionId, choice };
+    (next: Applied, patch: SelectionPatch) => {
       sessionStorage.setItem(APPLIED_KEY, JSON.stringify(next));
       setApplied(next);
-      composer.setSelection(toSelection(choice)).catch((cause: unknown) => {
-        console.warn("[section-defaults] could not apply preset", cause);
-      });
+      const branch = worktreeBranch(patch.environment);
+      composer
+        .setSelection(toSelection(patch))
+        .then(async () => {
+          if (branch !== null && !(await selectWorktreeBranch(branch))) {
+            console.warn(`[section-defaults] could not select worktree branch ${branch}`);
+          }
+        })
+        .catch((cause: unknown) => {
+          console.warn("[section-defaults] could not apply preset", cause);
+        });
     },
     [composer],
   );
 
   // bb writes the placement as the compose route mounts, possibly after this
   // banner, so poll and act once the same (visit, section) pair has been seen
-  // twice in a row. Each visit is rolled once; coming back to it keeps the
-  // earlier pick and any changes made by hand.
+  // twice in a row. Each visit is applied once; coming back to it (or the
+  // remount a project switch causes) keeps the earlier pick and any changes
+  // made by hand.
   useEffect(() => {
     let previous: string | null = null;
     const check = () => {
       const current = readPlacementSectionId(window.history.state, sessionStorage);
       setSectionId(current);
-      const preset = current === null ? undefined : presetsRef.current?.[current];
-      if (current === null || preset === undefined) {
+      const { presets: config, remembered: memory, rememberEnabled: remember } = latest.current;
+      const preset = current === null ? undefined : config?.[current];
+      const last = current === null || !remember ? undefined : memory[current];
+      if (current === null || config === null || (preset === undefined && last === undefined)) {
         previous = null;
         return;
       }
@@ -145,31 +201,53 @@ function SectionPresetBanner() {
       const stable = token === previous;
       previous = token;
       if (!stable || readApplied()?.token === token) return;
-      const choice = pickChoice(preset.choices);
-      if (choice !== null) apply(token, current, choice);
+      const choice = preset === undefined ? null : pickChoice(preset.choices);
+      const patch = buildSelection(last, choice);
+      if (patch !== null) apply({ token, sectionId: current, choice, restored: last !== undefined }, patch);
     };
     check();
     const timer = window.setInterval(check, PLACEMENT_POLL_MS);
     return () => window.clearInterval(timer);
   }, [apply]);
 
-  const preset = sectionId === null ? undefined : presets?.[sectionId];
-  if (applied === null || preset === undefined || applied.sectionId !== sectionId) return null;
+  // Record what each section's threads were actually started with.
+  useEffect(
+    () =>
+      composer.onSubmitted(() => {
+        const current = readPlacementSectionId(window.history.state, sessionStorage);
+        const { rememberEnabled: remember, selection } = latest.current;
+        if (current === null || !remember || selection === null) return;
+        void saveRemembered(current, toRemembered(selection));
+      }),
+    [composer, saveRemembered],
+  );
+
+  if (applied === null || applied.sectionId !== sectionId) return null;
+  const preset = presets?.[sectionId];
   const sectionName = sections.find((section) => section.id === sectionId)?.name ?? "Section";
-  const live = preset.choices.filter((choice) => choice.weight > 0);
+  const live = preset?.choices.filter((choice) => choice.weight > 0) ?? [];
   const reroll = () => {
+    const current = applied.choice;
     const others = live.filter(
-      (choice) => choice.providerId !== applied.choice.providerId || choice.model !== applied.choice.model ||
-        choice.reasoningLevel !== applied.choice.reasoningLevel,
+      (choice) =>
+        current === null ||
+        choice.providerId !== current.providerId ||
+        choice.model !== current.model ||
+        choice.reasoningLevel !== current.reasoningLevel,
     );
     const choice = pickChoice(others.length > 0 ? others : live);
-    if (choice !== null) apply(applied.token, applied.sectionId, choice);
+    const patch = buildSelection(undefined, choice);
+    if (choice !== null && patch !== null) apply({ ...applied, choice }, patch);
   };
+  const parts = [
+    applied.restored ? (applied.choice === null ? "last-used settings" : "last-used workspace") : null,
+    applied.choice === null || preset === undefined ? null : describeChoice(applied.choice, preset.choices),
+  ].filter((part): part is string => part !== null);
   return (
     <div className="flex items-center gap-2 px-1 pb-1 text-xs text-muted-foreground">
       <Icon name="section-defaults/shuffle" className="size-3.5 shrink-0" />
       <span className="min-w-0 truncate">
-        {sectionName}: {describeChoice(applied.choice, preset.choices)}
+        {sectionName}: {parts.join(" · ")}
       </span>
       {live.length > 1 ? (
         <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={reroll}>
@@ -287,14 +365,44 @@ function ChoiceRow({
   );
 }
 
+/** A short label for a remembered `CreateThreadEnvironmentArgs`. */
+function describeEnvironment(environment: Json | undefined): string | null {
+  if (typeof environment !== "object" || environment === null || Array.isArray(environment)) return null;
+  if (environment.type === "provider" && typeof environment.environmentProviderId === "string") {
+    const branch = worktreeBranch(environment);
+    return branch === null ? environment.environmentProviderId : `${environment.environmentProviderId} from ${branch}`;
+  }
+  const workspace = environment.workspace;
+  if (environment.type === "host" && typeof workspace === "object" && workspace !== null && !Array.isArray(workspace)) {
+    return typeof workspace.type === "string" ? workspace.type : "host";
+  }
+  return typeof environment.type === "string" ? environment.type : null;
+}
+
+function describeRemembered(remembered: Remembered, projects: readonly Section[]): string {
+  const project = remembered.projectId === undefined
+    ? undefined
+    : (projects.find((candidate) => candidate.id === remembered.projectId)?.name ?? remembered.projectId);
+  return [project, describeEnvironment(remembered.environment), remembered.model, remembered.reasoningLevel,
+    remembered.permissionMode]
+    .filter((part): part is string => part !== undefined && part !== null)
+    .join(" · ");
+}
+
 function SectionEditor({
   section,
   preset,
+  remembered,
+  projects,
   onSave,
+  onForget,
 }: {
   section: Section;
   preset: SectionPreset | undefined;
+  remembered: Remembered | undefined;
+  projects: readonly Section[];
   onSave: (preset: SectionPreset | null) => void;
+  onForget: () => void;
 }) {
   const choices = preset?.choices ?? [];
   const update = (next: PresetChoice[]) => onSave(next.length === 0 ? null : { choices: next });
@@ -303,7 +411,7 @@ function SectionEditor({
       <div className="flex items-center gap-2">
         <span className="text-sm font-medium">{section.name}</span>
         <span className="text-xs text-muted-foreground">
-          {choices.length === 0 ? "bb defaults" : choices.length === 1 ? "fixed" : "random"}
+          {choices.length === 0 ? (remembered === undefined ? "bb defaults" : "last used") : choices.length === 1 ? "fixed model" : "random model"}
         </span>
         <Button
           variant="ghost"
@@ -315,6 +423,14 @@ function SectionEditor({
           Add model
         </Button>
       </div>
+      {remembered === undefined ? null : (
+        <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="min-w-0 truncate">Last used: {describeRemembered(remembered, projects)}</span>
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onForget}>
+            Forget
+          </Button>
+        </div>
+      )}
       {choices.length === 0 ? null : (
         <ul className="mt-1 divide-y divide-border">
           {choices.map((choice, index) => (
@@ -333,13 +449,13 @@ function SectionEditor({
 }
 
 function SettingsPage() {
-  const { sections, presets, save, error } = usePresets();
+  const { sections, projects, presets, remembered, save, saveRemembered, error } = usePresets();
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm text-muted-foreground">
-        Choose the models a sidebar section's <strong>+</strong> button starts threads with. With several
-        models, each new thread picks one at random by weight; reasoning, tier, and permission go with the
-        model.
+        A sidebar section's <strong>+</strong> button starts the new thread with the project, workspace, and
+        model last used from that section. Add models to a section to choose the model instead: with several,
+        each new thread picks one at random by weight, and reasoning, tier, and permission go with the model.
       </p>
       {error === null ? null : (
         <p role="alert" className="text-sm text-destructive">
@@ -356,7 +472,10 @@ function SettingsPage() {
             key={section.id}
             section={section}
             preset={presets[section.id]}
+            remembered={remembered[section.id]}
+            projects={projects}
             onSave={(preset) => void save(section.id, preset)}
+            onForget={() => void saveRemembered(section.id, null)}
           />
         ))
       )}

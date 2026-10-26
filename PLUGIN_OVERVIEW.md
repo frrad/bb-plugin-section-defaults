@@ -3,8 +3,9 @@ weighted random pick between models.
 
 ## What you get
 
-- A section's **+** button starts the new-thread composer with that
-  section's model, reasoning level, service tier, and permission mode.
+- A section's **+** button starts the new-thread composer the way you last
+  started a thread from that section: project, worktree or checkout, base
+  branch, model, reasoning, and permission mode.
 - Several models per section, each with a weight: every new thread picks one
   at random, and a **Re-roll** button picks again.
 - A settings page that uses bb's own model and permission pickers, and a
