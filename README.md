@@ -4,41 +4,70 @@ A [bb](https://getbb.app) plugin that gives each sidebar section its own
 defaults for new threads.
 
 Press a section's **+** (New thread in section) and the new-thread composer
-starts with that section's model instead of the project's last-used one. A
-section can list several models with weights. Each new thread then picks one
-at random, e.g. 50/50 between Opus 5.5 on high reasoning and GPT-6.1-Sol on
-xhigh. Reasoning level, service tier, and permission mode belong to each
-model choice, so they always go together.
+starts the way you last started a thread from that section: same project,
+environment (worktree, checkout, …), machine, worktree base branch, model,
+reasoning, and permission mode. Sending a thread from that composer
+records its settings for next time.
 
-A line above the composer shows what was picked, with a **Re-roll** button
-that switches to one of the section's other choices. You can still change
-the pickers by hand before sending.
+A section can also choose its model from a weighted list. Each new thread
+then picks one at random, e.g. 50/50 between Opus 5.5 on high reasoning and
+GPT-6.1-Sol on xhigh; the pick replaces the remembered model. Reasoning
+level, service tier, and permission mode belong to each model in the list,
+so they always go together.
 
-Sections without a preset, Pinned, the loose Threads group, and the
-top-level New thread button are left alone.
+Lists are usually **model presets**: named, shared lists such as "Smart" or
+"Fast". Every section using a preset follows edits to it. A section can also
+have its own one-off list instead.
+
+A line above the composer says what was applied, with a **Re-roll** button
+when there are model choices to pick between. You can still change anything
+by hand before sending.
+
+A section with nothing remembered or configured yet, Pinned, the loose
+Threads group, and the top-level New thread button are left alone.
 
 ## Configure
 
-**Settings → Section Defaults** lists every section. **Add model** adds a
-choice, edited with bb's own provider/model/reasoning picker. Each choice can
-also set a permission mode and a weight; the page shows the resulting odds.
-Remove every choice to return a section to bb's defaults.
+**Settings → Section Defaults** has two parts:
+
+- **Model presets.** **New preset** adds one; rename it in place. **Add
+  model** adds a model, edited with bb's own provider/model/reasoning
+  picker, with an optional permission mode and a weight; the page shows the
+  odds and which sections use the preset. Deleting a preset leaves the
+  sections that used it with a one-off copy of its models.
+- **Sections.** Each section picks **Model: last used**, a preset, or
+  **One-off models** (which starts from a copy of what it used before). It
+  also shows what the section remembers; **Forget** clears it.
+
+Turn off **Remember last-used settings per section** there to use only the
+model lists.
 
 Or from a shell:
 
 ```sh
+bb section-defaults preset list [--json]
+bb section-defaults preset set <name> --choice '<provider>/<model> [reasoning=…] [weight=…] [permission=…] [tier=…]' [--choice …]
+bb section-defaults preset rename <preset> <new-name>
+bb section-defaults preset delete <preset>
+
 bb section-defaults list [--all] [--json]
-bb section-defaults set <section> --choice '<provider>/<model> [reasoning=…] [weight=…] [permission=…] [tier=…]' [--choice …]
-bb section-defaults clear <section>
+bb section-defaults use <section> <preset>              # link a section to a preset
+bb section-defaults set <section> --choice '…' [--choice …]   # one-off models
+bb section-defaults clear <section>                     # remove the section's models
+bb section-defaults forget <section>                    # forget last-used settings
 ```
 
-`<section>` is a section id or name. For example:
+Sections and presets are given by id or name. For example:
 
 ```sh
-bb section-defaults set research \
+bb section-defaults preset set Smart \
   --choice 'claude-code/claude-opus-5-5 reasoning=high' \
   --choice 'codex/gpt-6.1-sol reasoning=xhigh'
+bb section-defaults use research Smart
 ```
+
+`preset set` on an existing name replaces its models, and every section
+using it follows.
 
 Weights default to 1. `permission` is `accept-edits`, `auto`, or `full`.
 `bb provider models <provider>` lists model ids.
@@ -52,8 +81,15 @@ and the `bb.root-compose.placement` sessionStorage entry bb keeps afterwards
 ([placement.ts](placement.ts)). A bb update could change either. If that
 happens, the plugin stops applying presets; nothing else breaks.
 
-Each visit to the new-thread screen is rolled once. Going back to the same
+Each visit to the new-thread screen is applied once. Going back to the same
 visit keeps the earlier pick and any changes you made by hand.
+
+The worktree base branch needs one more workaround. bb's API can select the
+Worktree environment but not its branch, so the plugin opens the Worktree
+control and clicks the remembered branch ([worktree-branch.ts](worktree-branch.ts)).
+If that control changes in a bb update, the branch falls back to the
+default. A reused existing environment or worktree is never restored, since
+it pins the new thread to an old workspace.
 
 ## Install
 
@@ -67,7 +103,7 @@ bb plugin install .
 ## Develop
 
 ```sh
-npm test           # node --test presets.test.ts placement.test.ts
+npm test           # node --test presets.test.ts placement.test.ts worktree-branch.test.ts
 npm run typecheck
 bb plugin build . && bb plugin reload section-defaults
 ```

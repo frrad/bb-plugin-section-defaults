@@ -1,26 +1,44 @@
 ---
 name: section-defaults
-description: Set, list, or clear per-section defaults for new threads (model, reasoning, permission, weighted random model choice) with the Section Defaults plugin.
+description: Manage the Section Defaults plugin — per-section defaults for new threads (last-used project, workspace, branch, and model) and shared model presets with weighted random model choice.
 ---
 
 # Section defaults
 
-The Section Defaults plugin applies a preset when the user presses a sidebar
-section's **+** (New thread in section) button. A preset is a list of
-choices; each choice is a provider, model, optional reasoning level, service
-tier, permission mode, and a weight. With more than one choice, each new
-thread picks one at random by weight. Sections without a preset keep bb's
-normal defaults.
+When the user presses a sidebar section's **+** (New thread in section)
+button, the Section Defaults plugin restores the settings last used to start
+a thread from that section: project, environment and machine, worktree base
+branch, model, reasoning, and permission mode. They are recorded
+automatically each time a thread is sent from that composer.
+
+A section can also choose its model from a weighted list: each entry is a
+provider, model, optional reasoning level, service tier, permission mode,
+and a weight. Each new thread picks one at random by weight, replacing the
+remembered model. The list is either a shared **model preset** (e.g.
+"Smart"; sections using it follow edits) or the section's own one-off
+list.
 
 ```sh
-bb section-defaults list [--all] [--json]   # --all includes sections with no preset
-bb section-defaults set <section> --choice '<provider>/<model> [reasoning=…] [weight=…] [permission=…] [tier=…]' [--choice …]
-bb section-defaults clear <section>
+bb section-defaults preset list [--json]
+bb section-defaults preset set <name> --choice '<provider>/<model> [reasoning=…] [weight=…] [permission=…] [tier=…]' [--choice …]
+bb section-defaults preset rename <preset> <new-name>
+bb section-defaults preset delete <preset>   # sections using it keep a one-off copy
+
+bb section-defaults list [--all] [--json]   # --all includes sections with nothing set
+bb section-defaults use <section> <preset>  # link a section to a preset
+bb section-defaults set <section> --choice '…' [--choice …]   # one-off list; unlinks any preset
+bb section-defaults clear <section>         # remove the section's models
+bb section-defaults forget <section>        # forget last-used settings
 ```
 
-- `<section>` is a section id (`sec_…`) or its exact name, case-insensitive.
+- To change the models for every section on a preset, run `preset set` with
+  the preset's existing name; it replaces the whole list.
+
+- `<section>` and `<preset>` are ids (`sec_…`, `mp_…`) or exact names, case-insensitive.
   `bb thread section list` lists sections.
-- `set` replaces the whole preset. To add a choice, include the existing ones
+- Last-used settings cannot be set from the CLI; they come from actually
+  starting a thread from the section.
+- `set` replaces all of a section's one-off models. To add a choice, include the existing ones
   from `list` as well.
 - Fields in a `--choice` are separated by spaces or commas. `weight` defaults
   to 1 and may be 0 to disable a choice; `permission` is `accept-edits`,

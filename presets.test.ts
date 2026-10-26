@@ -1,7 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { describeChoice, formatOptionSpec, parseOptionSpec, pickChoice } from "./presets.ts";
-import type { PresetChoice } from "./presets.ts";
+import {
+  buildSelection,
+  describeChoice,
+  detachPreset,
+  formatOptionSpec,
+  parseOptionSpec,
+  pickChoice,
+  resolveSectionModels,
+} from "./presets.ts";
+import type { ModelPreset, PresetChoice, Remembered, SectionModelsConfig } from "./presets.ts";
 
 const opus: PresetChoice = {
   providerId: "claude-code",
@@ -82,4 +90,105 @@ test("parseOptionSpec rejects malformed input", () => {
 test("formatOptionSpec round-trips through parseOptionSpec", () => {
   const choice: PresetChoice = { ...opus, weight: 50, permissionMode: "full" };
   assert.deepEqual(parseOptionSpec(formatOptionSpec(choice)), choice);
+});
+
+test("buildSelection returns null with nothing to apply", () => {
+  assert.equal(buildSelection(undefined, null), null);
+});
+
+test("buildSelection restores the remembered project, environment, and model", () => {
+  const remembered: Remembered = {
+    projectId: "proj_1",
+    environment: { type: "provider", environmentProviderId: "worktree", inputs: null },
+    providerId: "codex",
+    model: "gpt-6-luna",
+    reasoningLevel: "low",
+    permissionMode: "full",
+  };
+  assert.deepEqual(buildSelection(remembered, null), {
+    projectId: "proj_1",
+    environment: { type: "provider", environmentProviderId: "worktree", inputs: null },
+    providerId: "codex",
+    model: "gpt-6-luna",
+    reasoningLevel: "low",
+    permissionMode: "full",
+  });
+});
+
+test("buildSelection lets the rolled choice replace the remembered model fields", () => {
+  const remembered: Remembered = {
+    projectId: "proj_1",
+    providerId: "codex",
+    model: "gpt-6-luna",
+    reasoningLevel: "low",
+    serviceTier: "fast",
+    permissionMode: "full",
+  };
+  // The remembered tier belonged to the remembered model, so it goes too; the
+  // permission mode is kept because the choice does not set one.
+  assert.deepEqual(buildSelection(remembered, opus), {
+    projectId: "proj_1",
+    providerId: "claude-code",
+    model: "claude-opus-5-5",
+    reasoningLevel: "high",
+    permissionMode: "full",
+  });
+  assert.deepEqual(buildSelection(remembered, { ...opus, permissionMode: "auto" })?.permissionMode, "auto");
+});
+
+test("buildSelection with only a choice sets just the model fields", () => {
+  assert.deepEqual(buildSelection(undefined, { ...sol, permissionMode: "auto" }), {
+    providerId: "codex",
+    model: "gpt-sol",
+    reasoningLevel: "xhigh",
+    permissionMode: "auto",
+  });
+});
+
+test("buildSelection never restores a reused environment", () => {
+  const remembered: Remembered = {
+    projectId: "proj_1",
+    environment: { type: "reuse", environmentId: "env_gone" },
+  };
+  assert.deepEqual(buildSelection(remembered, null), { projectId: "proj_1" });
+});
+
+const smart: ModelPreset = { name: "Smart", choices: [opus, sol] };
+
+test("resolveSectionModels follows a linked preset", () => {
+  assert.deepEqual(resolveSectionModels({ presetId: "mp_smart" }, { mp_smart: smart }), {
+    choices: [opus, sol],
+    presetName: "Smart",
+  });
+});
+
+test("resolveSectionModels sees edits to the linked preset", () => {
+  const edited: ModelPreset = { name: "Smart", choices: [sol] };
+  assert.deepEqual(resolveSectionModels({ presetId: "mp_smart" }, { mp_smart: edited })?.choices, [sol]);
+});
+
+test("resolveSectionModels returns a section's one-off choices", () => {
+  assert.deepEqual(resolveSectionModels({ choices: [opus] }, { mp_smart: smart }), {
+    choices: [opus],
+    presetName: null,
+  });
+});
+
+test("resolveSectionModels returns null with no models or a missing preset", () => {
+  assert.equal(resolveSectionModels(undefined, { mp_smart: smart }), null);
+  assert.equal(resolveSectionModels({ presetId: "mp_gone" }, { mp_smart: smart }), null);
+  assert.equal(resolveSectionModels({ choices: [] }, {}), null);
+});
+
+test("detachPreset turns sections linked to a preset into one-off copies", () => {
+  const sections: SectionModelsConfig = {
+    sec_a: { presetId: "mp_smart" },
+    sec_b: { presetId: "mp_fast" },
+    sec_c: { choices: [sol] },
+  };
+  assert.deepEqual(detachPreset(sections, "mp_smart", smart), {
+    sec_a: { choices: [opus, sol] },
+    sec_b: { presetId: "mp_fast" },
+    sec_c: { choices: [sol] },
+  });
 });

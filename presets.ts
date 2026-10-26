@@ -19,12 +19,122 @@ export interface PresetChoice {
   weight: number;
 }
 
-export interface SectionPreset {
+/** A named, reusable list of model choices, e.g. "Smart" or "Fast". */
+export interface ModelPreset {
+  name: string;
   choices: PresetChoice[];
 }
 
-/** Section id → preset. Sections without an entry keep bb's own defaults. */
-export type PresetConfig = Record<string, SectionPreset>;
+/** Preset id → preset. */
+export type ModelPresetConfig = Record<string, ModelPreset>;
+
+/**
+ * A section's models: a link to a shared preset (edits to the preset reach
+ * every section using it) or the section's own one-off list.
+ */
+export type SectionModels = { presetId: string } | { choices: PresetChoice[] };
+
+/** Section id → models. Sections without an entry keep the remembered or bb's model. */
+export type SectionModelsConfig = Record<string, SectionModels>;
+
+/** The choices a section rolls from, and the preset they come from (null for a one-off list). */
+export function resolveSectionModels(
+  section: SectionModels | undefined,
+  presets: ModelPresetConfig,
+): { choices: PresetChoice[]; presetName: string | null } | null {
+  if (section === undefined) return null;
+  if ("presetId" in section) {
+    const preset = presets[section.presetId];
+    return preset === undefined || preset.choices.length === 0
+      ? null
+      : { choices: preset.choices, presetName: preset.name };
+  }
+  return section.choices.length === 0 ? null : { choices: section.choices, presetName: null };
+}
+
+/** Before a preset is deleted: sections linked to it keep a one-off copy of its choices. */
+export function detachPreset(
+  sections: SectionModelsConfig,
+  presetId: string,
+  preset: ModelPreset,
+): SectionModelsConfig {
+  return Object.fromEntries(
+    Object.entries(sections).map(([sectionId, models]) => [
+      sectionId,
+      "presetId" in models && models.presetId === presetId ? { choices: [...preset.choices] } : models,
+    ]),
+  );
+}
+
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+/**
+ * What the new-thread composer last submitted from a section: project,
+ * environment (bb's `CreateThreadEnvironmentArgs`, kept opaque), and model
+ * settings. Restored the next time that section's `+` is pressed.
+ */
+export interface Remembered {
+  projectId?: string;
+  environment?: Json;
+  providerId?: string;
+  model?: string;
+  reasoningLevel?: string;
+  serviceTier?: string;
+  permissionMode?: PermissionMode;
+}
+
+/** Section id → last-used settings. */
+export type RememberedConfig = Record<string, Remembered>;
+
+/** The fields of `setSelection` this plugin fills in. */
+export interface SelectionPatch {
+  projectId?: string;
+  environment?: unknown;
+  providerId?: string;
+  model?: string;
+  reasoningLevel?: string;
+  serviceTier?: string;
+  permissionMode?: PermissionMode;
+}
+
+function isReusedEnvironment(environment: unknown): boolean {
+  return typeof environment === "object" && environment !== null && "type" in environment &&
+    environment.type === "reuse";
+}
+
+/**
+ * Combines a section's remembered settings with a rolled model choice. The
+ * choice wins for provider, model, reasoning, and tier; permission falls back
+ * to the remembered one. A reused environment is never restored: it pins the
+ * thread to one old worktree.
+ */
+export function buildSelection(
+  remembered: Remembered | undefined,
+  choice: PresetChoice | null,
+): SelectionPatch | null {
+  const patch: SelectionPatch = {};
+  if (remembered !== undefined) {
+    if (remembered.projectId !== undefined) patch.projectId = remembered.projectId;
+    if (remembered.environment !== undefined && !isReusedEnvironment(remembered.environment)) {
+      patch.environment = remembered.environment;
+    }
+    if (choice === null) {
+      if (remembered.providerId !== undefined) patch.providerId = remembered.providerId;
+      if (remembered.model !== undefined) patch.model = remembered.model;
+      if (remembered.reasoningLevel !== undefined) patch.reasoningLevel = remembered.reasoningLevel;
+      if (remembered.serviceTier !== undefined) patch.serviceTier = remembered.serviceTier;
+    }
+    if (remembered.permissionMode !== undefined) patch.permissionMode = remembered.permissionMode;
+  }
+  if (choice !== null) {
+    patch.providerId = choice.providerId;
+    patch.model = choice.model;
+    if (choice.reasoningLevel !== undefined) patch.reasoningLevel = choice.reasoningLevel;
+    if (choice.serviceTier !== undefined) patch.serviceTier = choice.serviceTier;
+    if (choice.permissionMode !== undefined) patch.permissionMode = choice.permissionMode;
+  }
+  return Object.keys(patch).length === 0 ? null : patch;
+}
 
 /** Weighted random pick. `random` returns a number in [0, 1). */
 export function pickChoice(
