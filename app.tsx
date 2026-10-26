@@ -12,7 +12,7 @@
 // - A settings page (Settings → Section Defaults) that edits the shared model
 //   presets and each section's models with bb's own provider/model and
 //   permission pickers, and shows what each section remembers.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   experimental_PermissionModePicker as PermissionModePicker,
@@ -23,6 +23,8 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { ComposerSelection } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
+import { applySelection } from "./application.ts";
+import type { SelectionApplication } from "./application.ts";
 import { readNavigationKey, readPlacementSectionId } from "./placement.ts";
 import { selectWorktreeBranch, worktreeBranch } from "./worktree-branch.ts";
 import {
@@ -51,7 +53,22 @@ import { Input } from "@/components/ui/input";
 /** How often the banner rechecks which section the new-thread screen belongs to. */
 const PLACEMENT_POLL_MS = 200;
 /** Remembers which visit to the new-thread screen was already rolled, across reloads. */
-const APPLIED_KEY = "section-defaults.applied";
+const APPLIED_KEY = "section-defaults.applied.v2";
+const PENDING_KEY = "section-defaults.pending.v2";
+
+// The host remounts banners when a project switch completes. Keep the in-flight
+// operation outside React so that remount cannot draw again or unlock early.
+const applications = new Map<string, { next: Applied; job: SelectionApplication }>();
+let activeComposer: ReturnType<typeof useComposer> | null = null;
+let activeApplication: Promise<void> | null = null;
+
+function currentVisit(): { sectionId: string; token: string } | null {
+  const sectionId = readPlacementSectionId(window.history.state, sessionStorage);
+  return sectionId === null ? null : {
+    sectionId,
+    token: `${readNavigationKey(window.history.state) ?? ""}:${sectionId}`,
+  };
+}
 
 interface Section {
   id: string;
@@ -75,6 +92,7 @@ function useConfig(): {
   saveModelPreset: (id: string | null, preset: ModelPreset) => void;
   deleteModelPreset: (id: string) => void;
   setRemembered: (sectionId: string, remembered: Remembered | null) => void;
+  refetch: () => void;
 } {
   const rpc = useRpc<typeof rpcContract>();
   const [config, setConfig] = useState<Config | null>(null);
@@ -147,7 +165,7 @@ function useConfig(): {
       ),
     [rpc, run],
   );
-  return { config, error, setSectionModels, saveModelPreset, deleteModelPreset, setRemembered };
+  return { config, error, setSectionModels, saveModelPreset, deleteModelPreset, setRemembered, refetch };
 }
 
 // --- Composer banner -------------------------------------------------------
@@ -192,61 +210,124 @@ function toRemembered(selection: ComposerSelection): Remembered {
 
 function SectionPresetBanner() {
   const composer = useComposer();
-  const { config, setRemembered } = useConfig();
+  const { config, error: configError, setRemembered, refetch } = useConfig();
   const [applied, setApplied] = useState<Applied | null>(readApplied);
-  const [sectionId, setSectionId] = useState<string | null>(null);
+  const [sectionId, setSectionId] = useState<string | null>(() => currentVisit()?.sectionId ?? null);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [applicationError, setApplicationError] = useState<string | null>(null);
   const latest = useRef({ config, selection: composer.selection });
   latest.current = { config, selection: composer.selection };
 
-  const apply = useCallback(
-    (next: Applied, patch: SelectionPatch) => {
-      sessionStorage.setItem(APPLIED_KEY, JSON.stringify(next));
-      setApplied(next);
-      const branch = worktreeBranch(patch.environment);
-      composer
-        .setSelection(toSelection(patch))
-        .then(async () => {
-          if (branch !== null && !(await selectWorktreeBranch(branch))) {
-            console.warn(`[section-defaults] could not select worktree branch ${branch}`);
-          }
-        })
-        .catch((cause: unknown) => {
-          console.warn("[section-defaults] could not apply preset", cause);
-        });
-    },
-    [composer],
-  );
+  const apply = useCallback((next: Applied, patch: SelectionPatch) => {
+    const job: SelectionApplication = { patch, status: "pending", running: false, error: null };
+    applications.set(next.token, { next, job });
+    if (applications.size > 50) {
+      for (const [token, entry] of applications) {
+        if (token !== next.token && !entry.job.running) applications.delete(token);
+        if (applications.size <= 50) break;
+      }
+    }
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify({ next, patch }));
+    setProgress("Applying section defaults…");
+    setApplicationError(null);
+  }, []);
 
-  // bb writes the placement as the compose route mounts, possibly after this
-  // banner, so poll and act once the same (visit, section) pair has been seen
-  // twice in a row. Each visit is applied once; coming back to it (or the
-  // remount a project switch causes) keeps the earlier pick and any changes
-  // made by hand.
-  useEffect(() => {
-    let previous: string | null = null;
+  // Lock before paint, including while config loads. The SDK's input lock only
+  // locks editing, so also guard the host's send button and keyboard submission.
+  // These data attributes belong to bb's composer, like placement.ts's route
+  // keys; keep this fallback scoped to the mounted new-thread banner.
+  useLayoutEffect(() => {
+    activeComposer = composer;
+    let blocked = false;
+    let alive = true;
+    const guard = (event: Event) => {
+      check();
+      queueMicrotask(check); // router state is written by the click handler
+      if (!blocked || !(event.target instanceof Element)) return;
+      const target = event.target;
+      const send = target.closest("[data-promptbox-submit-action], [data-promptbox-submit-group]");
+      const enter = event instanceof KeyboardEvent && event.key === "Enter" &&
+        !event.shiftKey && target.closest("[data-promptbox]");
+      if (send || enter || (event.type === "submit" && target.querySelector("[data-promptbox]"))) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
     const check = () => {
-      const current = readPlacementSectionId(window.history.state, sessionStorage);
-      setSectionId(current);
-      const { config: state } = latest.current;
-      const models =
-        current === null || state === null ? null : resolveSectionModels(state.sectionModels[current], state.modelPresets);
-      const last = current === null || state === null || !state.rememberEnabled ? undefined : state.remembered[current];
-      if (current === null || state === null || (models === null && last === undefined)) {
-        previous = null;
+      if (!alive) return;
+      const visit = currentVisit();
+      setSectionId(visit?.sectionId ?? null);
+      if (visit === null) {
+        blocked = false;
+        composer.setInputLock(false);
+        setProgress(null);
+        setApplicationError(null);
         return;
       }
-      const token = `${readNavigationKey(window.history.state) ?? ""}:${current}`;
-      const stable = token === previous;
-      previous = token;
-      if (!stable || readApplied()?.token === token) return;
-      const choice = models === null ? null : pickChoice(models.choices);
-      const patch = buildSelection(last, choice);
-      if (patch !== null) apply({ token, sectionId: current, choice, restored: last !== undefined }, patch);
+      const state = latest.current.config;
+      let entry = applications.get(visit.token);
+      if (entry === undefined && readApplied()?.token !== visit.token && state !== null) {
+        const models = resolveSectionModels(state.sectionModels[visit.sectionId], state.modelPresets);
+        const last = state.rememberEnabled ? state.remembered[visit.sectionId] : undefined;
+        let saved: { next: Applied; patch: SelectionPatch } | null = null;
+        try { saved = JSON.parse(sessionStorage.getItem(PENDING_KEY) ?? "null"); } catch { /* draw below */ }
+        if (saved?.next.token === visit.token) {
+          apply(saved.next, saved.patch);
+        } else {
+          const choice = models === null ? null : pickChoice(models.choices);
+          const patch = buildSelection(last, choice);
+          if (patch !== null) apply({ token: visit.token, sectionId: visit.sectionId, choice, restored: last !== undefined }, patch);
+        }
+        entry = applications.get(visit.token);
+      }
+      blocked = (state === null && entry === undefined && readApplied()?.token !== visit.token) ||
+        (entry !== undefined && entry.job.status !== "applied");
+      composer.setInputLock(blocked);
+      setProgress(state === null && blocked ? "Loading section defaults…" : entry?.job.status === "pending" ? "Applying section defaults…" : null);
+      setApplicationError(entry?.job.status === "error" ? entry.job.error : null);
+      if (entry?.job.status === "applied") setApplied(entry.next);
+      if (entry !== undefined && entry.job.status === "pending" && !entry.job.running && activeApplication === null) {
+        const { next, job } = entry;
+        activeApplication = applySelection(job, {
+          isCurrent: () => currentVisit()?.token === next.token,
+          select: async (patch) => {
+            if (activeComposer === null) throw new Error("Waiting for the composer to finish loading.");
+            return await activeComposer.setSelection(toSelection(patch)) as SelectionPatch;
+          },
+          complete: async () => {
+            const branch = worktreeBranch(job.patch.environment);
+            if (branch !== null && !(await selectWorktreeBranch(branch))) {
+              console.warn(`[section-defaults] could not select worktree branch ${branch}`);
+            }
+            if (currentVisit()?.token !== next.token) return;
+            sessionStorage.setItem(APPLIED_KEY, JSON.stringify(next));
+            sessionStorage.removeItem(PENDING_KEY);
+          },
+        }).finally(() => { activeApplication = null; });
+      }
     };
+    document.addEventListener("click", guard, true);
+    document.addEventListener("keydown", guard, true);
+    document.addEventListener("submit", guard, true);
     check();
     const timer = window.setInterval(check, PLACEMENT_POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener("click", guard, true);
+      document.removeEventListener("keydown", guard, true);
+      document.removeEventListener("submit", guard, true);
+      composer.setInputLock(false);
+      if (activeComposer === composer) activeComposer = null;
+    };
+  }, [composer, config, apply]);
+
+  // A cold-start RPC failure must not strand the composer until a realtime edit.
+  useEffect(() => {
+    if (config !== null || configError === null) return;
+    const timer = window.setInterval(refetch, 1000);
     return () => window.clearInterval(timer);
-  }, [apply]);
+  }, [config, configError, refetch]);
 
   // Record what each section's threads were actually started with.
   useEffect(
@@ -260,6 +341,24 @@ function SectionPresetBanner() {
     [composer, setRemembered],
   );
 
+  if (sectionId !== null && (progress !== null || applicationError !== null || configError !== null)) {
+    const error = applicationError ?? configError;
+    return (
+      <div className="flex items-center gap-2 px-1 pb-1 text-xs text-muted-foreground" role={error === null ? "status" : "alert"}>
+        <span>{error ?? progress}</span>
+        {error === null ? null : (
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => {
+            const visit = currentVisit();
+            const entry = visit === null ? undefined : applications.get(visit.token);
+            if (entry !== undefined) { entry.job.status = "pending"; entry.job.error = null; }
+            refetch();
+            setApplicationError(null);
+            setProgress("Applying section defaults…");
+          }}>Retry</Button>
+        )}
+      </div>
+    );
+  }
   if (applied === null || applied.sectionId !== sectionId || config === null) return null;
   const models = resolveSectionModels(config.sectionModels[sectionId], config.modelPresets);
   const sectionName = config.sections.find((section) => section.id === sectionId)?.name ?? "Section";
