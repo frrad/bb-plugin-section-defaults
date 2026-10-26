@@ -33,6 +33,10 @@
     "worktree-branch.test.ts",
     "components",
     "lib",
-    "hooks"
+    "hooks",
+    "application.ts",
+    "application.test.ts",
+    "app.test.tsx",
+    "vitest.config.ts"
   ]
 }

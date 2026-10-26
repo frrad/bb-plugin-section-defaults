@@ -23,6 +23,14 @@ A line above the composer says what was applied, with a **Re-roll** button
 when there are model choices to pick between. You can still change anything
 by hand before sending.
 
+During startup the composer shows **Loading section defaults…** or
+**Applying section defaults…** and waits before accepting input or sends.
+The plugin verifies that the selected provider and model match its pick,
+retrying that same pick for up to 30 seconds while providers load. A failed
+application stays blocked with a **Retry** button. Project-switch remounts
+and page reloads retain a pending pick; a visit is marked applied only after
+its model switch succeeds.
+
 A section with nothing remembered or configured yet, Pinned, the loose
 Threads group, and the top-level New thread button are left alone.
 
@@ -103,7 +111,7 @@ bb plugin install .
 ## Develop
 
 ```sh
-npm test           # node --test presets.test.ts placement.test.ts worktree-branch.test.ts
+npm test           # pure logic and composer lifecycle regression tests
 npm run typecheck
 bb plugin build . && bb plugin reload section-defaults
 ```
