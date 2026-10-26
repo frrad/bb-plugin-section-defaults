@@ -4,13 +4,14 @@
 //
 // - A banner on the new-thread composer. When the screen was opened from a
 //   sidebar section's `+` button, it restores the project, workspace, and
-//   model last used from that section, then, if the section has model
-//   choices, picks one (weighted at random) for the model. The banner says
-//   what it did and can re-roll. Sending from the composer records the
-//   settings for next time. See placement.ts for how the section is detected.
-// - A settings page (Settings → Section Defaults) that edits each section's
-//   choices with bb's own provider/model and permission pickers and shows
-//   what each section remembers.
+//   model last used from that section, then, if the section has models (a
+//   shared preset or a one-off list), picks one (weighted at random) for the
+//   model. The banner says what it did and can re-roll. Sending from the
+//   composer records the settings for next time. See placement.ts for how the
+//   section is detected.
+// - A settings page (Settings → Section Defaults) that edits the shared model
+//   presets and each section's models with bb's own provider/model and
+//   permission pickers, and shows what each section remembers.
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
@@ -24,14 +25,23 @@ import type { ComposerSelection } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import { readNavigationKey, readPlacementSectionId } from "./placement.ts";
 import { selectWorktreeBranch, worktreeBranch } from "./worktree-branch.ts";
-import { PRESETS_CHANGED, buildSelection, choiceOdds, describeChoice, pickChoice } from "./presets.ts";
+import {
+  PRESETS_CHANGED,
+  buildSelection,
+  choiceOdds,
+  describeChoice,
+  pickChoice,
+  resolveSectionModels,
+} from "./presets.ts";
 import type {
   Json,
+  ModelPreset,
+  ModelPresetConfig,
   PresetChoice,
-  PresetConfig,
   Remembered,
   RememberedConfig,
-  SectionPreset,
+  SectionModels,
+  SectionModelsConfig,
   SelectionPatch,
 } from "./presets.ts";
 import { Button } from "@/components/ui/button";
@@ -48,69 +58,96 @@ interface Section {
   name: string;
 }
 
-function usePresets(): {
+interface Config {
   sections: Section[];
   projects: Section[];
-  presets: PresetConfig | null;
+  modelPresets: ModelPresetConfig;
+  sectionModels: SectionModelsConfig;
   remembered: RememberedConfig;
   rememberEnabled: boolean;
-  save: (sectionId: string, preset: SectionPreset | null) => Promise<void>;
-  saveRemembered: (sectionId: string, remembered: Remembered | null) => Promise<void>;
+}
+
+/** Everything the plugin stores, kept current by the server's realtime signal. */
+function useConfig(): {
+  config: Config | null;
   error: string | null;
+  setSectionModels: (sectionId: string, models: SectionModels | null) => void;
+  saveModelPreset: (id: string | null, preset: ModelPreset) => void;
+  deleteModelPreset: (id: string) => void;
+  setRemembered: (sectionId: string, remembered: Remembered | null) => void;
 } {
   const rpc = useRpc<typeof rpcContract>();
-  const [sections, setSections] = useState<Section[]>([]);
-  const [projects, setProjects] = useState<Section[]>([]);
-  const [presets, setPresets] = useState<PresetConfig | null>(null);
-  const [remembered, setRemembered] = useState<RememberedConfig>({});
-  const [rememberEnabled, setRememberEnabled] = useState(false);
+  const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
   const report = useCallback((cause: unknown) => {
     setError(cause instanceof Error ? cause.message : String(cause));
   }, []);
   const refetch = useCallback(() => {
-    rpc.call("presets_get").then((result) => {
-      setSections(result.sections);
-      setProjects(result.projects);
-      setPresets(result.presets);
-      setRemembered(result.remembered);
-      setRememberEnabled(result.rememberEnabled);
+    rpc.call("state_get").then((result) => {
+      setConfig(result);
       setError(null);
     }, report);
   }, [rpc, report]);
   useEffect(refetch, [refetch]);
   useRealtime(PRESETS_CHANGED, refetch);
-  const save = useCallback(
-    async (sectionId: string, preset: SectionPreset | null) => {
-      setPresets((current) => {
-        const next = { ...current };
-        if (preset === null) delete next[sectionId];
-        else next[sectionId] = preset;
-        return next;
-      });
-      try {
-        const result = await rpc.call("presets_set", { sectionId, preset });
-        setPresets(result.presets);
-        setError(null);
-      } catch (cause) {
+  // Writes update the local copy at once; the server's signal then refetches.
+  const run = useCallback(
+    (optimistic: (current: Config) => Config, call: () => Promise<unknown>) => {
+      setConfig((current) => (current === null ? current : optimistic(current)));
+      call().then(() => setError(null), (cause: unknown) => {
         report(cause);
         refetch();
-      }
+      });
     },
-    [rpc, report, refetch],
+    [report, refetch],
   );
-  const saveRemembered = useCallback(
-    async (sectionId: string, next: Remembered | null) => {
-      try {
-        const result = await rpc.call("remembered_set", { sectionId, remembered: next });
-        setRemembered(result.remembered);
-      } catch (cause) {
-        report(cause);
-      }
-    },
-    [rpc, report],
+  const setSectionModels = useCallback(
+    (sectionId: string, models: SectionModels | null) =>
+      run(
+        (current) => {
+          const sectionModels = { ...current.sectionModels };
+          if (models === null) delete sectionModels[sectionId];
+          else sectionModels[sectionId] = models;
+          return { ...current, sectionModels };
+        },
+        () => rpc.call("section_models_set", { sectionId, models }),
+      ),
+    [rpc, run],
   );
-  return { sections, projects, presets, remembered, rememberEnabled, save, saveRemembered, error };
+  const saveModelPreset = useCallback(
+    (id: string | null, preset: ModelPreset) =>
+      run(
+        (current) => (id === null ? current : { ...current, modelPresets: { ...current.modelPresets, [id]: preset } }),
+        () => rpc.call("model_preset_save", { id, preset }),
+      ),
+    [rpc, run],
+  );
+  const deleteModelPreset = useCallback(
+    (id: string) =>
+      run(
+        (current) => {
+          const modelPresets = { ...current.modelPresets };
+          delete modelPresets[id];
+          return { ...current, modelPresets };
+        },
+        () => rpc.call("model_preset_delete", { id }),
+      ),
+    [rpc, run],
+  );
+  const setRemembered = useCallback(
+    (sectionId: string, remembered: Remembered | null) =>
+      run(
+        (current) => {
+          const all = { ...current.remembered };
+          if (remembered === null) delete all[sectionId];
+          else all[sectionId] = remembered;
+          return { ...current, remembered: all };
+        },
+        () => rpc.call("remembered_set", { sectionId, remembered }),
+      ),
+    [rpc, run],
+  );
+  return { config, error, setSectionModels, saveModelPreset, deleteModelPreset, setRemembered };
 }
 
 // --- Composer banner -------------------------------------------------------
@@ -155,11 +192,11 @@ function toRemembered(selection: ComposerSelection): Remembered {
 
 function SectionPresetBanner() {
   const composer = useComposer();
-  const { sections, presets, remembered, rememberEnabled, saveRemembered } = usePresets();
+  const { config, setRemembered } = useConfig();
   const [applied, setApplied] = useState<Applied | null>(readApplied);
   const [sectionId, setSectionId] = useState<string | null>(null);
-  const latest = useRef({ presets, remembered, rememberEnabled, selection: composer.selection });
-  latest.current = { presets, remembered, rememberEnabled, selection: composer.selection };
+  const latest = useRef({ config, selection: composer.selection });
+  latest.current = { config, selection: composer.selection };
 
   const apply = useCallback(
     (next: Applied, patch: SelectionPatch) => {
@@ -190,10 +227,11 @@ function SectionPresetBanner() {
     const check = () => {
       const current = readPlacementSectionId(window.history.state, sessionStorage);
       setSectionId(current);
-      const { presets: config, remembered: memory, rememberEnabled: remember } = latest.current;
-      const preset = current === null ? undefined : config?.[current];
-      const last = current === null || !remember ? undefined : memory[current];
-      if (current === null || config === null || (preset === undefined && last === undefined)) {
+      const { config: state } = latest.current;
+      const models =
+        current === null || state === null ? null : resolveSectionModels(state.sectionModels[current], state.modelPresets);
+      const last = current === null || state === null || !state.rememberEnabled ? undefined : state.remembered[current];
+      if (current === null || state === null || (models === null && last === undefined)) {
         previous = null;
         return;
       }
@@ -201,7 +239,7 @@ function SectionPresetBanner() {
       const stable = token === previous;
       previous = token;
       if (!stable || readApplied()?.token === token) return;
-      const choice = preset === undefined ? null : pickChoice(preset.choices);
+      const choice = models === null ? null : pickChoice(models.choices);
       const patch = buildSelection(last, choice);
       if (patch !== null) apply({ token, sectionId: current, choice, restored: last !== undefined }, patch);
     };
@@ -215,17 +253,17 @@ function SectionPresetBanner() {
     () =>
       composer.onSubmitted(() => {
         const current = readPlacementSectionId(window.history.state, sessionStorage);
-        const { rememberEnabled: remember, selection } = latest.current;
-        if (current === null || !remember || selection === null) return;
-        void saveRemembered(current, toRemembered(selection));
+        const { config: state, selection } = latest.current;
+        if (current === null || state === null || !state.rememberEnabled || selection === null) return;
+        setRemembered(current, toRemembered(selection));
       }),
-    [composer, saveRemembered],
+    [composer, setRemembered],
   );
 
-  if (applied === null || applied.sectionId !== sectionId) return null;
-  const preset = presets?.[sectionId];
-  const sectionName = sections.find((section) => section.id === sectionId)?.name ?? "Section";
-  const live = preset?.choices.filter((choice) => choice.weight > 0) ?? [];
+  if (applied === null || applied.sectionId !== sectionId || config === null) return null;
+  const models = resolveSectionModels(config.sectionModels[sectionId], config.modelPresets);
+  const sectionName = config.sections.find((section) => section.id === sectionId)?.name ?? "Section";
+  const live = models?.choices.filter((choice) => choice.weight > 0) ?? [];
   const reroll = () => {
     const current = applied.choice;
     const others = live.filter(
@@ -241,7 +279,8 @@ function SectionPresetBanner() {
   };
   const parts = [
     applied.restored ? (applied.choice === null ? "last-used settings" : "last-used workspace") : null,
-    applied.choice === null || preset === undefined ? null : describeChoice(applied.choice, preset.choices),
+    models?.presetName ?? null,
+    applied.choice === null || models === null ? null : describeChoice(applied.choice, models.choices),
   ].filter((part): part is string => part !== null);
   return (
     <div className="flex items-center gap-2 px-1 pb-1 text-xs text-muted-foreground">
@@ -389,39 +428,137 @@ function describeRemembered(remembered: Remembered, projects: readonly Section[]
     .join(" · ");
 }
 
+/** Edits a weighted list of models; shared by presets and one-off section lists. */
+function ChoicesEditor({
+  choices,
+  onChange,
+}: {
+  choices: readonly PresetChoice[];
+  onChange: (next: PresetChoice[]) => void;
+}) {
+  return (
+    <>
+      {choices.length === 0 ? null : (
+        <ul className="mt-1 divide-y divide-border">
+          {choices.map((choice, index) => (
+            <ChoiceRow
+              key={index}
+              choice={choice}
+              choices={choices}
+              onChange={(next) => onChange(choices.map((existing, i) => (i === index ? next : existing)))}
+              onRemove={() => onChange(choices.filter((_, i) => i !== index))}
+            />
+          ))}
+        </ul>
+      )}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="mt-1 text-xs"
+        onClick={() => onChange([...choices, newChoice(choices[choices.length - 1])])}
+      >
+        <Icon name="Plus" className="size-3.5" />
+        Add model
+      </Button>
+    </>
+  );
+}
+
+function PresetEditor({
+  preset,
+  usedBy,
+  onSave,
+  onDelete,
+}: {
+  preset: ModelPreset;
+  usedBy: readonly string[];
+  onSave: (preset: ModelPreset) => void;
+  onDelete: () => void;
+}) {
+  const [name, setName] = useState(preset.name);
+  useEffect(() => setName(preset.name), [preset.name]);
+  const commitName = () => {
+    const next = name.trim();
+    if (next === "" || next === preset.name) setName(preset.name);
+    else onSave({ ...preset, name: next });
+  };
+  return (
+    <div className="rounded-lg border border-border bg-card px-4 py-3">
+      <div className="flex items-center gap-2">
+        <Input
+          className="h-7 w-48 text-sm font-medium"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          onBlur={commitName}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") commitName();
+          }}
+          aria-label="Preset name"
+        />
+        <span className="min-w-0 truncate text-xs text-muted-foreground">
+          {usedBy.length === 0 ? "not used yet" : `used by ${usedBy.join(", ")}`}
+        </span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="ml-auto size-7 text-muted-foreground hover:text-foreground"
+          aria-label={`Delete preset ${preset.name}; sections using it keep a copy of its models`}
+          onClick={onDelete}
+        >
+          <Icon name="Trash2" className="size-4" />
+        </Button>
+      </div>
+      <ChoicesEditor choices={preset.choices} onChange={(choices) => onSave({ ...preset, choices })} />
+    </div>
+  );
+}
+
+const NO_MODELS = "";
+const ONE_OFF = "__one-off__";
+
 function SectionEditor({
   section,
-  preset,
+  models,
+  presets,
   remembered,
   projects,
-  onSave,
+  onChange,
   onForget,
 }: {
   section: Section;
-  preset: SectionPreset | undefined;
+  models: SectionModels | undefined;
+  presets: ModelPresetConfig;
   remembered: Remembered | undefined;
   projects: readonly Section[];
-  onSave: (preset: SectionPreset | null) => void;
+  onChange: (models: SectionModels | null) => void;
   onForget: () => void;
 }) {
-  const choices = preset?.choices ?? [];
-  const update = (next: PresetChoice[]) => onSave(next.length === 0 ? null : { choices: next });
+  const mode = models === undefined ? NO_MODELS : "presetId" in models ? models.presetId : ONE_OFF;
+  const resolved = resolveSectionModels(models, presets);
+  const switchTo = (next: string) => {
+    if (next === NO_MODELS) onChange(null);
+    // Start a one-off list from whatever the section rolls from today.
+    else if (next === ONE_OFF) onChange({ choices: resolved?.choices.map((choice) => ({ ...choice })) ?? [newChoice(undefined)] });
+    else onChange({ presetId: next });
+  };
   return (
     <div className="rounded-lg border border-border bg-card px-4 py-3">
       <div className="flex items-center gap-2">
         <span className="text-sm font-medium">{section.name}</span>
-        <span className="text-xs text-muted-foreground">
-          {choices.length === 0 ? (remembered === undefined ? "bb defaults" : "last used") : choices.length === 1 ? "fixed model" : "random model"}
-        </span>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="ml-auto text-xs"
-          onClick={() => update([...choices, newChoice(choices[choices.length - 1])])}
+        <select
+          className="ml-auto h-7 rounded-md border border-border bg-background px-2 text-xs"
+          value={mode}
+          onChange={(event) => switchTo(event.target.value)}
+          aria-label={`Models for ${section.name}`}
         >
-          <Icon name="Plus" className="size-3.5" />
-          Add model
-        </Button>
+          <option value={NO_MODELS}>Model: last used</option>
+          {Object.entries(presets).map(([id, preset]) => (
+            <option key={id} value={id}>
+              Preset: {preset.name}
+            </option>
+          ))}
+          <option value={ONE_OFF}>One-off models</option>
+        </select>
       </div>
       {remembered === undefined ? null : (
         <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
@@ -431,53 +568,90 @@ function SectionEditor({
           </Button>
         </div>
       )}
-      {choices.length === 0 ? null : (
-        <ul className="mt-1 divide-y divide-border">
-          {choices.map((choice, index) => (
-            <ChoiceRow
-              key={index}
-              choice={choice}
-              choices={choices}
-              onChange={(next) => update(choices.map((existing, i) => (i === index ? next : existing)))}
-              onRemove={() => update(choices.filter((_, i) => i !== index))}
-            />
-          ))}
-        </ul>
+      {models !== undefined && "choices" in models ? (
+        <ChoicesEditor choices={models.choices} onChange={(choices) => onChange({ choices })} />
+      ) : resolved === null ? null : (
+        <p className="mt-1 text-xs text-muted-foreground">
+          {resolved.choices.map((choice) => describeChoice(choice, resolved.choices)).join("  ·  ")}
+        </p>
       )}
     </div>
   );
 }
 
 function SettingsPage() {
-  const { sections, projects, presets, remembered, save, saveRemembered, error } = usePresets();
+  const { config, error, setSectionModels, saveModelPreset, deleteModelPreset, setRemembered } = useConfig();
+  const usedBy = (presetId: string): string[] =>
+    config?.sections
+      .filter((section) => {
+        const models = config.sectionModels[section.id];
+        return models !== undefined && "presetId" in models && models.presetId === presetId;
+      })
+      .map((section) => section.name) ?? [];
+  const addPreset = () => {
+    if (config === null) return;
+    const taken = new Set(Object.values(config.modelPresets).map((preset) => preset.name.toLowerCase()));
+    let name = "New preset";
+    for (let n = 2; taken.has(name.toLowerCase()); n += 1) name = `New preset ${n}`;
+    saveModelPreset(null, { name, choices: [newChoice(undefined)] });
+  };
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm text-muted-foreground">
         A sidebar section's <strong>+</strong> button starts the new thread with the project, workspace, and
-        model last used from that section. Add models to a section to choose the model instead: with several,
-        each new thread picks one at random by weight, and reasoning, tier, and permission go with the model.
+        model last used from that section. To choose the model instead, give the section a preset (shared, so
+        editing it updates every section using it) or one-off models. With several models, each new thread picks
+        one at random by weight; reasoning, tier, and permission go with the model.
       </p>
       {error === null ? null : (
         <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}
-      {presets === null ? (
+      {config === null ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : sections.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No sections yet. Create one from the sidebar first.</p>
       ) : (
-        sections.map((section) => (
-          <SectionEditor
-            key={section.id}
-            section={section}
-            preset={presets[section.id]}
-            remembered={remembered[section.id]}
-            projects={projects}
-            onSave={(preset) => void save(section.id, preset)}
-            onForget={() => void saveRemembered(section.id, null)}
-          />
-        ))
+        <>
+          <div className="flex items-center gap-2 pt-2">
+            <h3 className="text-sm font-medium">Model presets</h3>
+            <Button variant="ghost" size="sm" className="ml-auto text-xs" onClick={addPreset}>
+              <Icon name="Plus" className="size-3.5" />
+              New preset
+            </Button>
+          </div>
+          {Object.keys(config.modelPresets).length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No presets yet. Create one, e.g. "Smart" or "Fast", then pick it for sections below.
+            </p>
+          ) : (
+            Object.entries(config.modelPresets).map(([id, preset]) => (
+              <PresetEditor
+                key={id}
+                preset={preset}
+                usedBy={usedBy(id)}
+                onSave={(next) => saveModelPreset(id, next)}
+                onDelete={() => deleteModelPreset(id)}
+              />
+            ))
+          )}
+          <h3 className="pt-2 text-sm font-medium">Sections</h3>
+          {config.sections.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No sections yet. Create one from the sidebar first.</p>
+          ) : (
+            config.sections.map((section) => (
+              <SectionEditor
+                key={section.id}
+                section={section}
+                models={config.sectionModels[section.id]}
+                presets={config.modelPresets}
+                remembered={config.remembered[section.id]}
+                projects={config.projects}
+                onChange={(models) => setSectionModels(section.id, models)}
+                onForget={() => setRemembered(section.id, null)}
+              />
+            ))
+          )}
+        </>
       )}
     </div>
   );
@@ -486,7 +660,7 @@ function SettingsPage() {
 export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "section-presets",
-    title: "Section presets",
+    title: "Section defaults",
     component: SettingsPage,
   });
   app.composer.customize({

@@ -6,8 +6,10 @@ weighted random pick between models.
 - A section's **+** button starts the new-thread composer the way you last
   started a thread from that section: project, worktree or checkout, base
   branch, model, reasoning, and permission mode.
-- Several models per section, each with a weight: every new thread picks one
-  at random, and a **Re-roll** button picks again.
+- Shared model presets such as "Smart" or "Fast": weighted model lists that
+  sections link to and follow when edited, or one-off lists per section.
+  Every new thread picks a model at random by weight, and a **Re-roll**
+  button picks again.
 - A settings page that uses bb's own model and permission pickers, and a
   `bb section-defaults` command for the same settings from a shell.
 

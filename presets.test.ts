@@ -1,7 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSelection, describeChoice, formatOptionSpec, parseOptionSpec, pickChoice } from "./presets.ts";
-import type { PresetChoice, Remembered } from "./presets.ts";
+import {
+  buildSelection,
+  describeChoice,
+  detachPreset,
+  formatOptionSpec,
+  parseOptionSpec,
+  pickChoice,
+  resolveSectionModels,
+} from "./presets.ts";
+import type { ModelPreset, PresetChoice, Remembered, SectionModelsConfig } from "./presets.ts";
 
 const opus: PresetChoice = {
   providerId: "claude-code",
@@ -143,4 +151,44 @@ test("buildSelection never restores a reused environment", () => {
     environment: { type: "reuse", environmentId: "env_gone" },
   };
   assert.deepEqual(buildSelection(remembered, null), { projectId: "proj_1" });
+});
+
+const smart: ModelPreset = { name: "Smart", choices: [opus, sol] };
+
+test("resolveSectionModels follows a linked preset", () => {
+  assert.deepEqual(resolveSectionModels({ presetId: "mp_smart" }, { mp_smart: smart }), {
+    choices: [opus, sol],
+    presetName: "Smart",
+  });
+});
+
+test("resolveSectionModels sees edits to the linked preset", () => {
+  const edited: ModelPreset = { name: "Smart", choices: [sol] };
+  assert.deepEqual(resolveSectionModels({ presetId: "mp_smart" }, { mp_smart: edited })?.choices, [sol]);
+});
+
+test("resolveSectionModels returns a section's one-off choices", () => {
+  assert.deepEqual(resolveSectionModels({ choices: [opus] }, { mp_smart: smart }), {
+    choices: [opus],
+    presetName: null,
+  });
+});
+
+test("resolveSectionModels returns null with no models or a missing preset", () => {
+  assert.equal(resolveSectionModels(undefined, { mp_smart: smart }), null);
+  assert.equal(resolveSectionModels({ presetId: "mp_gone" }, { mp_smart: smart }), null);
+  assert.equal(resolveSectionModels({ choices: [] }, {}), null);
+});
+
+test("detachPreset turns sections linked to a preset into one-off copies", () => {
+  const sections: SectionModelsConfig = {
+    sec_a: { presetId: "mp_smart" },
+    sec_b: { presetId: "mp_fast" },
+    sec_c: { choices: [sol] },
+  };
+  assert.deepEqual(detachPreset(sections, "mp_smart", smart), {
+    sec_a: { choices: [opus, sol] },
+    sec_b: { presetId: "mp_fast" },
+    sec_c: { choices: [sol] },
+  });
 });

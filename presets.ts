@@ -19,12 +19,52 @@ export interface PresetChoice {
   weight: number;
 }
 
-export interface SectionPreset {
+/** A named, reusable list of model choices, e.g. "Smart" or "Fast". */
+export interface ModelPreset {
+  name: string;
   choices: PresetChoice[];
 }
 
-/** Section id → preset. Sections without an entry keep bb's own defaults. */
-export type PresetConfig = Record<string, SectionPreset>;
+/** Preset id → preset. */
+export type ModelPresetConfig = Record<string, ModelPreset>;
+
+/**
+ * A section's models: a link to a shared preset (edits to the preset reach
+ * every section using it) or the section's own one-off list.
+ */
+export type SectionModels = { presetId: string } | { choices: PresetChoice[] };
+
+/** Section id → models. Sections without an entry keep the remembered or bb's model. */
+export type SectionModelsConfig = Record<string, SectionModels>;
+
+/** The choices a section rolls from, and the preset they come from (null for a one-off list). */
+export function resolveSectionModels(
+  section: SectionModels | undefined,
+  presets: ModelPresetConfig,
+): { choices: PresetChoice[]; presetName: string | null } | null {
+  if (section === undefined) return null;
+  if ("presetId" in section) {
+    const preset = presets[section.presetId];
+    return preset === undefined || preset.choices.length === 0
+      ? null
+      : { choices: preset.choices, presetName: preset.name };
+  }
+  return section.choices.length === 0 ? null : { choices: section.choices, presetName: null };
+}
+
+/** Before a preset is deleted: sections linked to it keep a one-off copy of its choices. */
+export function detachPreset(
+  sections: SectionModelsConfig,
+  presetId: string,
+  preset: ModelPreset,
+): SectionModelsConfig {
+  return Object.fromEntries(
+    Object.entries(sections).map(([sectionId, models]) => [
+      sectionId,
+      "presetId" in models && models.presetId === presetId ? { choices: [...preset.choices] } : models,
+    ]),
+  );
+}
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
