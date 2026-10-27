@@ -16,8 +16,9 @@ level, service tier, and permission mode belong to each model in the list,
 so they always go together.
 
 Lists are usually **model presets**: named, shared lists such as "Smart" or
-"Fast". Every section using a preset follows edits to it. A section can also
-have its own one-off list instead.
+"Fast". Every section using a preset follows edits to it. Set one preset as
+the **default** to use it in every section without its own model choice,
+instead of the last-used model. A section can also have its own one-off list.
 
 A line above the composer says what was applied, with a **Re-roll** button
 when there are model choices to pick between. You can still change anything
@@ -43,9 +44,12 @@ Threads group, and the top-level New thread button are left alone.
   picker, with an optional permission mode and a weight; the page shows the
   odds and which sections use the preset. Deleting a preset leaves the
   sections that used it with a one-off copy of its models.
-- **Sections.** Each section picks **Model: last used**, a preset, or
-  **One-off models** (which starts from a copy of what it used before). It
-  also shows what the section remembers; **Forget** clears it.
+- **Default preset.** Applies to every section without its own model choice.
+  Set it to **None** to keep using those sections' last-used models.
+- **Sections.** Each section picks the default preset (or **Model: last used**
+  when there is no default), its own preset, or **One-off models** (which
+  starts from a copy of what it used before). It also shows what the section
+  remembers; **Forget** clears it.
 
 Turn off **Remember last-used settings per section** there to use only the
 model lists.
@@ -59,6 +63,8 @@ bb section-defaults preset rename <preset> <new-name>
 bb section-defaults preset delete <preset>
 
 bb section-defaults list [--all] [--json]
+bb section-defaults default set <preset>                # fallback for sections without their own models
+bb section-defaults default clear                       # restore last-used models in those sections
 bb section-defaults use <section> <preset>              # link a section to a preset
 bb section-defaults set <section> --choice '…' [--choice …]   # one-off models
 bb section-defaults clear <section>                     # remove the section's models
@@ -75,7 +81,8 @@ bb section-defaults use research Smart
 ```
 
 `preset set` on an existing name replaces its models, and every section
-using it follows.
+using it follows. Deleting the default preset clears the default; explicit
+section links to any deleted preset become one-off copies.
 
 Weights default to 1. `permission` is `accept-edits`, `auto`, or `full`.
 `bb provider models <provider>` lists model ids.

@@ -16,7 +16,9 @@ provider, model, optional reasoning level, service tier, permission mode,
 and a weight. Each new thread picks one at random by weight, replacing the
 remembered model. The list is either a shared **model preset** (e.g.
 "Smart"; sections using it follow edits) or the section's own one-off
-list.
+list. A preset can also be the global **default** for sections without their
+own model choice; it replaces their remembered model while leaving their
+remembered project and workspace intact.
 
 ```sh
 bb section-defaults preset list [--json]
@@ -25,6 +27,8 @@ bb section-defaults preset rename <preset> <new-name>
 bb section-defaults preset delete <preset>   # sections using it keep a one-off copy
 
 bb section-defaults list [--all] [--json]   # --all includes sections with nothing set
+bb section-defaults default set <preset>    # fallback for sections without their own models
+bb section-defaults default clear           # use last-used models in those sections again
 bb section-defaults use <section> <preset>  # link a section to a preset
 bb section-defaults set <section> --choice '…' [--choice …]   # one-off list; unlinks any preset
 bb section-defaults clear <section>         # remove the section's models
@@ -33,6 +37,8 @@ bb section-defaults forget <section>        # forget last-used settings
 
 - To change the models for every section on a preset, run `preset set` with
   the preset's existing name; it replaces the whole list.
+- A section's own preset or one-off list overrides the default preset.
+  Deleting the default preset clears the default.
 
 - `<section>` and `<preset>` are ids (`sec_…`, `mp_…`) or exact names, case-insensitive.
   `bb thread section list` lists sections.
