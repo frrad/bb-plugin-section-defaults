@@ -174,6 +174,18 @@ test("resolveSectionModels returns a section's one-off choices", () => {
   });
 });
 
+test("resolveSectionModels uses the default preset only when a section has no models", () => {
+  assert.deepEqual(resolveSectionModels(undefined, { mp_smart: smart }, "mp_smart"), {
+    choices: [opus, sol],
+    presetName: "Smart",
+  });
+  assert.deepEqual(resolveSectionModels({ choices: [sol] }, { mp_smart: smart }, "mp_smart"), {
+    choices: [sol],
+    presetName: null,
+  });
+  assert.equal(resolveSectionModels(undefined, { mp_smart: smart }, "mp_gone"), null);
+});
+
 test("resolveSectionModels returns null with no models or a missing preset", () => {
   assert.equal(resolveSectionModels(undefined, { mp_smart: smart }), null);
   assert.equal(resolveSectionModels({ presetId: "mp_gone" }, { mp_smart: smart }), null);

@@ -10,6 +10,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 const config = {
   sections: [{ id: "section", name: "Test" }], projects: [], remembered: {}, rememberEnabled: true,
+  defaultPresetId: null,
   modelPresets: {}, sectionModels: { section: { choices: [{ providerId: "claude-code", model: "opus", weight: 1 }] } },
 };
 async function mount(state_get: () => unknown) {
@@ -42,6 +43,23 @@ test("cold startup locks input and blocks sends until config and the model are a
   expect(slot.inspection.composer.inputLocked).toBe(false);
   fireEvent.click(button); expect(sent).toHaveBeenCalledOnce();
   slot.lifecycle.unmount(); button.remove(); editor.remove();
+  expect(slot.inspection.composer.inputLocked).toBe(false);
+});
+
+test("a default preset supplies the model for a section without its own models", async () => {
+  const slot = await mount(() => ({
+    ...config,
+    defaultPresetId: "mp_smart",
+    modelPresets: {
+      mp_smart: { name: "Smart", choices: [{ providerId: "claude-code", model: "default-opus", weight: 1 }] },
+    },
+    sectionModels: {},
+    remembered: { section: { providerId: "codex", model: "last-used" } },
+  }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+  expect(slot.inspection.composer.selection?.providerId).toBe("claude-code");
+  expect(slot.inspection.composer.selection?.model).toBe("default-opus");
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
   expect(slot.inspection.composer.inputLocked).toBe(false);
 });
 

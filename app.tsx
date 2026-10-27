@@ -80,6 +80,7 @@ interface Config {
   projects: Section[];
   modelPresets: ModelPresetConfig;
   sectionModels: SectionModelsConfig;
+  defaultPresetId: string | null;
   remembered: RememberedConfig;
   rememberEnabled: boolean;
 }
@@ -89,6 +90,7 @@ function useConfig(): {
   config: Config | null;
   error: string | null;
   setSectionModels: (sectionId: string, models: SectionModels | null) => void;
+  setDefaultPreset: (id: string | null) => void;
   saveModelPreset: (id: string | null, preset: ModelPreset) => void;
   deleteModelPreset: (id: string) => void;
   setRemembered: (sectionId: string, remembered: Remembered | null) => void;
@@ -132,6 +134,14 @@ function useConfig(): {
       ),
     [rpc, run],
   );
+  const setDefaultPreset = useCallback(
+    (id: string | null) =>
+      run(
+        (current) => ({ ...current, defaultPresetId: id }),
+        () => rpc.call("default_preset_set", { id }),
+      ),
+    [rpc, run],
+  );
   const saveModelPreset = useCallback(
     (id: string | null, preset: ModelPreset) =>
       run(
@@ -146,7 +156,11 @@ function useConfig(): {
         (current) => {
           const modelPresets = { ...current.modelPresets };
           delete modelPresets[id];
-          return { ...current, modelPresets };
+          return {
+            ...current,
+            modelPresets,
+            defaultPresetId: current.defaultPresetId === id ? null : current.defaultPresetId,
+          };
         },
         () => rpc.call("model_preset_delete", { id }),
       ),
@@ -165,7 +179,7 @@ function useConfig(): {
       ),
     [rpc, run],
   );
-  return { config, error, setSectionModels, saveModelPreset, deleteModelPreset, setRemembered, refetch };
+  return { config, error, setSectionModels, setDefaultPreset, saveModelPreset, deleteModelPreset, setRemembered, refetch };
 }
 
 // --- Composer banner -------------------------------------------------------
@@ -267,7 +281,9 @@ function SectionPresetBanner() {
       const state = latest.current.config;
       let entry = applications.get(visit.token);
       if (entry === undefined && readApplied()?.token !== visit.token && state !== null) {
-        const models = resolveSectionModels(state.sectionModels[visit.sectionId], state.modelPresets);
+        const models = resolveSectionModels(
+          state.sectionModels[visit.sectionId], state.modelPresets, state.defaultPresetId,
+        );
         const last = state.rememberEnabled ? state.remembered[visit.sectionId] : undefined;
         let saved: { next: Applied; patch: SelectionPatch } | null = null;
         try { saved = JSON.parse(sessionStorage.getItem(PENDING_KEY) ?? "null"); } catch { /* draw below */ }
@@ -360,7 +376,7 @@ function SectionPresetBanner() {
     );
   }
   if (applied === null || applied.sectionId !== sectionId || config === null) return null;
-  const models = resolveSectionModels(config.sectionModels[sectionId], config.modelPresets);
+  const models = resolveSectionModels(config.sectionModels[sectionId], config.modelPresets, config.defaultPresetId);
   const sectionName = config.sections.find((section) => section.id === sectionId)?.name ?? "Section";
   const live = models?.choices.filter((choice) => choice.weight > 0) ?? [];
   const reroll = () => {
@@ -619,6 +635,7 @@ function SectionEditor({
   section,
   models,
   presets,
+  defaultPresetId,
   remembered,
   projects,
   onChange,
@@ -627,6 +644,7 @@ function SectionEditor({
   section: Section;
   models: SectionModels | undefined;
   presets: ModelPresetConfig;
+  defaultPresetId: string | null;
   remembered: Remembered | undefined;
   projects: readonly Section[];
   onChange: (models: SectionModels | null) => void;
@@ -650,7 +668,11 @@ function SectionEditor({
           onChange={(event) => switchTo(event.target.value)}
           aria-label={`Models for ${section.name}`}
         >
-          <option value={NO_MODELS}>Model: last used</option>
+          <option value={NO_MODELS}>
+            {defaultPresetId === null
+              ? "Model: last used"
+              : `Model: default (${presets[defaultPresetId]?.name ?? "missing preset"})`}
+          </option>
           {Object.entries(presets).map(([id, preset]) => (
             <option key={id} value={id}>
               Preset: {preset.name}
@@ -679,7 +701,8 @@ function SectionEditor({
 }
 
 function SettingsPage() {
-  const { config, error, setSectionModels, saveModelPreset, deleteModelPreset, setRemembered } = useConfig();
+  const { config, error, setSectionModels, setDefaultPreset, saveModelPreset, deleteModelPreset, setRemembered } =
+    useConfig();
   const usedBy = (presetId: string): string[] =>
     config?.sections
       .filter((section) => {
@@ -698,9 +721,10 @@ function SettingsPage() {
     <div className="flex flex-col gap-3">
       <p className="text-sm text-muted-foreground">
         A sidebar section's <strong>+</strong> button starts the new thread with the project, workspace, and
-        model last used from that section. To choose the model instead, give the section a preset (shared, so
-        editing it updates every section using it) or one-off models. With several models, each new thread picks
-        one at random by weight; reasoning, tier, and permission go with the model.
+        model last used from that section. To choose the model instead, set a default preset for all sections or
+        give one section a preset (shared, so editing it updates every section using it) or one-off models. With
+        several models, each new thread picks one at random by weight; reasoning, tier, and permission go with
+        the model.
       </p>
       {error === null ? null : (
         <p role="alert" className="text-sm text-destructive">
@@ -711,6 +735,25 @@ function SettingsPage() {
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : (
         <>
+          <div className="rounded-lg border border-border bg-card px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">Default preset</span>
+              <select
+                className="ml-auto h-7 rounded-md border border-border bg-background px-2 text-xs"
+                value={config.defaultPresetId ?? NO_MODELS}
+                onChange={(event) => setDefaultPreset(event.target.value || null)}
+                aria-label="Default model preset"
+              >
+                <option value={NO_MODELS}>None</option>
+                {Object.entries(config.modelPresets).map(([id, preset]) => (
+                  <option key={id} value={id}>{preset.name}</option>
+                ))}
+              </select>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Used by sections without their own models, instead of their last-used model.
+            </p>
+          </div>
           <div className="flex items-center gap-2 pt-2">
             <h3 className="text-sm font-medium">Model presets</h3>
             <Button variant="ghost" size="sm" className="ml-auto text-xs" onClick={addPreset}>
@@ -743,6 +786,7 @@ function SettingsPage() {
                 section={section}
                 models={config.sectionModels[section.id]}
                 presets={config.modelPresets}
+                defaultPresetId={config.defaultPresetId}
                 remembered={config.remembered[section.id]}
                 projects={config.projects}
                 onChange={(models) => setSectionModels(section.id, models)}

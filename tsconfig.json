@@ -24,6 +24,7 @@
   },
   "include": [
     "server.ts",
+    "server.test.ts",
     "app.tsx",
     "presets.ts",
     "presets.test.ts",

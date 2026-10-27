@@ -34,15 +34,19 @@ export type ModelPresetConfig = Record<string, ModelPreset>;
  */
 export type SectionModels = { presetId: string } | { choices: PresetChoice[] };
 
-/** Section id → models. Sections without an entry keep the remembered or bb's model. */
+/** Section id → models. Sections without an entry can inherit the global default preset. */
 export type SectionModelsConfig = Record<string, SectionModels>;
 
 /** The choices a section rolls from, and the preset they come from (null for a one-off list). */
 export function resolveSectionModels(
   section: SectionModels | undefined,
   presets: ModelPresetConfig,
+  defaultPresetId?: string | null,
 ): { choices: PresetChoice[]; presetName: string | null } | null {
-  if (section === undefined) return null;
+  if (section === undefined) {
+    if (defaultPresetId == null) return null;
+    section = { presetId: defaultPresetId };
+  }
   if ("presetId" in section) {
     const preset = presets[section.presetId];
     return preset === undefined || preset.choices.length === 0

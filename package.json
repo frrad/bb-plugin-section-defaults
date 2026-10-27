@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-section-defaults",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "engines": {
     "bb": ">=0.47",
@@ -57,7 +57,7 @@
     "vitest": "^5.0.5"
   },
   "scripts": {
-    "test": "node --test presets.test.ts placement.test.ts worktree-branch.test.ts application.test.ts && vitest run",
+    "test": "node --test presets.test.ts placement.test.ts worktree-branch.test.ts application.test.ts server.test.ts && vitest run",
     "typecheck": "tsc"
   }
 }

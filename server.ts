@@ -56,12 +56,17 @@ export const rpcContract = defineRpcContract({
       projects: z.array(namedSchema),
       modelPresets: modelPresetConfigSchema,
       sectionModels: sectionModelsConfigSchema,
+      defaultPresetId: z.string().min(1).nullable(),
       remembered: rememberedConfigSchema,
       rememberEnabled: z.boolean(),
     }),
   },
   section_models_set: {
     input: z.object({ sectionId: z.string().min(1), models: sectionModelsSchema.nullable() }),
+    output: z.null(),
+  },
+  default_preset_set: {
+    input: z.object({ id: z.string().min(1).nullable() }),
     output: z.null(),
   },
   model_preset_save: {
@@ -81,6 +86,7 @@ export const rpcContract = defineRpcContract({
 // "presets" predates named presets; it holds each section's models.
 const SECTION_MODELS_KEY = "presets";
 const MODEL_PRESETS_KEY = "modelPresets";
+const DEFAULT_PRESET_KEY = "defaultPresetId";
 const REMEMBERED_KEY = "remembered";
 
 export default async function plugin(bb: BbPluginApi): Promise<void> {
@@ -107,6 +113,10 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   const readModelPresets = (): Promise<ModelPresetConfig> => read(MODEL_PRESETS_KEY, modelPresetConfigSchema);
   const readSectionModels = (): Promise<SectionModelsConfig> => read(SECTION_MODELS_KEY, sectionModelsConfigSchema);
   const readRemembered = (): Promise<RememberedConfig> => read(REMEMBERED_KEY, rememberedConfigSchema);
+  const readDefaultPresetId = async (): Promise<string | null> => {
+    const parsed = z.string().min(1).nullable().safeParse(await bb.storage.kv.get(DEFAULT_PRESET_KEY));
+    return parsed.success ? parsed.data : null;
+  };
 
   async function setSectionModels(sectionId: string, models: SectionModels | null): Promise<void> {
     const all = await readSectionModels();
@@ -131,11 +141,17 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     return presetId;
   }
 
+  async function setDefaultPreset(id: string | null): Promise<void> {
+    if (id !== null && (await readModelPresets())[id] === undefined) throw new Error(`No model preset ${id}`);
+    await write(DEFAULT_PRESET_KEY, id);
+  }
+
   async function deleteModelPreset(id: string): Promise<void> {
     const all = await readModelPresets();
     const preset = all[id];
     if (preset === undefined) return;
     await write(SECTION_MODELS_KEY, detachPreset(await readSectionModels(), id, preset));
+    if (await readDefaultPresetId() === id) await write(DEFAULT_PRESET_KEY, null);
     delete all[id];
     await write(MODEL_PRESETS_KEY, all);
   }
@@ -180,11 +196,16 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       projects: (await bb.sdk.projects.list()).map(({ id, name }) => ({ id, name })),
       modelPresets: await readModelPresets(),
       sectionModels: await readSectionModels(),
+      defaultPresetId: await readDefaultPresetId(),
       remembered: await readRemembered(),
       rememberEnabled: (await settings.get()).rememberLastUsed,
     }),
     section_models_set: async ({ sectionId, models }) => {
       await setSectionModels(sectionId, models);
+      return null;
+    },
+    default_preset_set: async ({ id }) => {
+      await setDefaultPreset(id);
       return null;
     },
     model_preset_save: async ({ id, preset }) => ({ id: await saveModelPreset(id, preset) }),
@@ -243,9 +264,12 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     models: SectionModels | undefined,
     presets: ModelPresetConfig,
     remembered: Remembered | undefined,
+    defaultPresetId: string | null,
   ): string {
     const lines = [`${section.name} (${section.id})`];
-    if (models === undefined) lines.push("  models: (none; last used or bb's default)");
+    if (models === undefined && defaultPresetId !== null) {
+      lines.push(`  models: default preset ${presets[defaultPresetId]?.name ?? `${defaultPresetId} (missing)`}`);
+    } else if (models === undefined) lines.push("  models: (none; last used or bb's default)");
     else if ("presetId" in models) lines.push(`  models: preset ${presets[models.presetId]?.name ?? `${models.presetId} (missing)`}`);
     else lines.push("  models (one-off):", ...formatChoices(models.choices, "    "));
     if (remembered !== undefined) lines.push(`  last used: ${formatRemembered(remembered)}`);
@@ -264,8 +288,10 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   }
 
   async function describeSection(section: Named): Promise<string> {
-    const [models, presets, remembered] = await Promise.all([readSectionModels(), readModelPresets(), readRemembered()]);
-    return formatSection(section, models[section.id], presets, remembered[section.id]);
+    const [models, presets, remembered, defaultPresetId] = await Promise.all([
+      readSectionModels(), readModelPresets(), readRemembered(), readDefaultPresetId(),
+    ]);
+    return formatSection(section, models[section.id], presets, remembered[section.id], defaultPresetId);
   }
 
   bb.cli.register(
@@ -280,11 +306,12 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
             json: jsonOption,
           },
           async run(input) {
-            const [sections, models, presets, remembered] = await Promise.all([
+            const [sections, models, presets, remembered, defaultPresetId] = await Promise.all([
               listSections(),
               readSectionModels(),
               readModelPresets(),
               readRemembered(),
+              readDefaultPresetId(),
             ]);
             const shown = sections.filter(
               (section) =>
@@ -308,9 +335,25 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
             return {
               exitCode: 0,
               stdout: shown
-                .map((section) => formatSection(section, models[section.id], presets, remembered[section.id]))
+                .map((section) => formatSection(section, models[section.id], presets, remembered[section.id], defaultPresetId))
                 .join("\n\n"),
             };
+          },
+        }),
+        "default set": cliCommand({
+          summary: "Use a preset for every section without its own models",
+          positionals: [{ name: "preset", description: "Model preset id or name", required: true }],
+          async run(input) {
+            const preset = await resolvePreset(input.positionals.preset);
+            await setDefaultPreset(preset.id);
+            return { exitCode: 0, stdout: `Default preset: ${preset.name} (${preset.id})` };
+          },
+        }),
+        "default clear": cliCommand({
+          summary: "Stop applying a default preset to sections without their own models",
+          async run() {
+            await setDefaultPreset(null);
+            return { exitCode: 0, stdout: "Cleared the default preset" };
           },
         }),
         use: cliCommand({

@@ -7,7 +7,8 @@ weighted random pick between models.
   started a thread from that section: project, worktree or checkout, base
   branch, model, reasoning, and permission mode.
 - Shared model presets such as "Smart" or "Fast": weighted model lists that
-  sections link to and follow when edited, or one-off lists per section.
+  sections link to and follow when edited, or one-off lists per section. A
+  default preset can supply models to every section without its own choice.
   Every new thread picks a model at random by weight, and a **Re-roll**
   button picks again.
 - A settings page that uses bb's own model and permission pickers, and a
