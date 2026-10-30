@@ -299,7 +299,11 @@ function SectionPresetBanner() {
       blocked = (state === null && entry === undefined && readApplied()?.token !== visit.token) ||
         (entry !== undefined && entry.job.status !== "applied");
       composer.setInputLock(blocked);
-      setProgress(state === null && blocked ? "Loading section defaults…" : entry?.job.status === "pending" ? "Applying section defaults…" : null);
+      setProgress(
+        state === null && blocked ? "Loading section defaults…"
+          : entry?.job.status === "pending" ? `Applying section defaults…${entry.job.error === null ? "" : ` ${entry.job.error}`}`
+          : null,
+      );
       setApplicationError(entry?.job.status === "error" ? entry.job.error : null);
       if (entry?.job.status === "applied") setApplied(entry.next);
       if (entry !== undefined && entry.job.status === "pending" && !entry.job.running && activeApplication === null) {
@@ -359,18 +363,56 @@ function SectionPresetBanner() {
 
   if (sectionId !== null && (progress !== null || applicationError !== null || configError !== null)) {
     const error = applicationError ?? configError;
+    const visit = currentVisit();
+    const entry = visit === null ? undefined : applications.get(visit.token);
+    const failedChoice = applicationError === null ? null : entry?.next.choice ?? null;
+    const sectionChoices = config === null ? [] :
+      resolveSectionModels(config.sectionModels[sectionId], config.modelPresets, config.defaultPresetId)
+        ?.choices.filter((choice) => choice.weight > 0) ?? [];
+    const alternatives = failedChoice === null ? [] : sectionChoices.filter(
+      (choice) => choice.providerId !== failedChoice.providerId || choice.model !== failedChoice.model,
+    );
+    const retry = () => {
+      if (entry !== undefined) { entry.job.status = "pending"; entry.job.error = null; }
+      refetch();
+      setApplicationError(null);
+      setProgress("Applying section defaults…");
+    };
+    const reroll = () => {
+      if (entry === undefined || config === null) return;
+      const choice = pickChoice(alternatives);
+      const last = config.rememberEnabled ? config.remembered[entry.next.sectionId] : undefined;
+      const patch = buildSelection(last, choice);
+      if (choice !== null && patch !== null) apply({ ...entry.next, choice }, patch);
+    };
+    const proceed = () => {
+      if (entry === undefined) return;
+      entry.job.status = "applied";
+      entry.job.error = null;
+      const next = { ...entry.next, choice: null };
+      sessionStorage.setItem(APPLIED_KEY, JSON.stringify(next));
+      sessionStorage.removeItem(PENDING_KEY);
+      composer.setInputLock(false);
+      setApplied(next);
+      setApplicationError(null);
+      setProgress(null);
+    };
     return (
-      <div className="flex items-center gap-2 px-1 pb-1 text-xs text-muted-foreground" role={error === null ? "status" : "alert"}>
-        <span>{error ?? progress}</span>
+      <div
+        className={`flex flex-wrap items-center gap-2 px-1 pb-1 text-xs ${error === null ? "text-muted-foreground" : "text-destructive"}`}
+        role={error === null ? "status" : "alert"}
+      >
+        <span>{error === null ? progress : `Section defaults failed: ${error}`}</span>
         {error === null ? null : (
-          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => {
-            const visit = currentVisit();
-            const entry = visit === null ? undefined : applications.get(visit.token);
-            if (entry !== undefined) { entry.job.status = "pending"; entry.job.error = null; }
-            refetch();
-            setApplicationError(null);
-            setProgress("Applying section defaults…");
-          }}>Retry</Button>
+          <>
+            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={retry}>Retry</Button>
+            {alternatives.length > 0 ? (
+              <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={reroll}>Re-roll</Button>
+            ) : null}
+            {applicationError !== null && entry !== undefined ? (
+              <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={proceed}>Use current model</Button>
+            ) : null}
+          </>
         )}
       </div>
     );

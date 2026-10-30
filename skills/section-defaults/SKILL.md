@@ -54,3 +54,8 @@ bb section-defaults forget <section>        # forget last-used settings
   preset is applied.
 
 The same settings are editable in Settings → Section Defaults.
+
+If the composer shows **Section defaults failed: X is not available on this
+machine**, the drawn model isn't in that machine's provider catalog (check
+`bb provider models <provider> --machine <host>`). Fix the machine's provider
+config or point the section at a preset whose models that machine offers.

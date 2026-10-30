@@ -26,9 +26,21 @@ by hand before sending.
 
 During startup the composer shows **Loading section defaults…** or
 **Applying section defaults…** and waits before accepting input or sends.
-The plugin verifies that the selected provider and model match its pick,
-retrying that same pick for up to 30 seconds while providers load. A failed
-application stays blocked with a **Retry** button. Project-switch remounts
+The plugin verifies that the selected provider and model match its pick and
+fails loudly rather than waiting:
+
+- bb only reports the selection once the provider's model catalog has
+  loaded, so if the provider is right but the model is not, the model is not
+  offered on that machine (e.g. the preset names a model the machine's pi
+  config lacks). That fails at once.
+- A provider bb ignored may still be starting, so only that is retried, for
+  up to 10 seconds.
+- A selection switch that never settles fails after 25 seconds.
+
+A failure shows a red **Section defaults failed: …** line naming the model and
+what bb picked instead, and logs it to the console. The composer stays
+blocked with **Retry**, **Re-roll** (draw another of the section's models),
+and **Use current model** (unlock and keep what bb selected). Project-switch remounts
 and page reloads retain a pending pick; a visit is marked applied only after
 its model switch succeeds.
 
