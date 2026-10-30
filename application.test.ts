@@ -78,3 +78,46 @@ test("host reconciliation of reasoning and permissions does not trigger endless 
   });
   assert.equal(job.status, "applied");
 });
+
+test("a model the loaded catalog does not list fails at once instead of retrying", async () => {
+  const job = make();
+  let calls = 0;
+  await applySelection(job, {
+    isCurrent: () => true,
+    select: async () => { calls++; return { providerId: "claude-code", model: "sonnet" }; },
+    wait: async () => { throw new Error("must not wait"); },
+    complete: async () => { throw new Error("must not complete"); },
+  });
+  assert.equal(calls, 1);
+  assert.equal(job.status, "error");
+  assert.match(job.error ?? "", /claude-code\/opus is not available.*claude-code\/sonnet/);
+  assert.equal(job.running, false);
+});
+
+test("a provider that never appears fails after the provider timeout", async () => {
+  const job = make();
+  let clock = 0;
+  await applySelection(job, {
+    isCurrent: () => true,
+    select: async () => ({ providerId: "codex", model: "default" }),
+    now: () => clock,
+    wait: async () => { clock += 500; },
+    providerTimeoutMs: 2000,
+    complete: async () => {},
+  });
+  assert.equal(job.status, "error");
+  assert.match(job.error ?? "", /Provider claude-code is not available/);
+});
+
+test("a setSelection call that never settles fails instead of hanging", async () => {
+  const job = make();
+  await applySelection(job, {
+    isCurrent: () => true,
+    select: () => new Promise(() => {}),
+    selectTimeoutMs: 10,
+    complete: async () => {},
+  });
+  assert.equal(job.status, "error");
+  assert.match(job.error ?? "", /did not finish switching to claude-code\/opus/);
+  assert.equal(job.running, false);
+});
