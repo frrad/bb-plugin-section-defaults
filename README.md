@@ -24,7 +24,8 @@ Providers that are out of subscription capacity are not rolled. If bb's
 provider usage shows any usage window at 100% that hasn't reset yet (e.g.
 Codex's weekly limit), that provider's models are left out of the pick and
 the Re-roll buttons until the window resets, and the banner says which
-provider was skipped. If every model in the list is out of capacity, the pick
+provider was skipped. Hover the skipped provider for the full limit and reset
+time. If every model in the list is out of capacity, the pick
 uses all of them as usual. Usage is read from bb at most once a minute. A read
 that fails or takes more than 2 seconds never holds up the composer: the last
 reading is used, or nothing is skipped.

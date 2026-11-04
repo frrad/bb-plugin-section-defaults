@@ -103,5 +103,7 @@ test("a provider out of capacity is not rolled, and the banner says it was skipp
   await act(async () => { await vi.advanceTimersByTimeAsync(200); });
   expect(slot.inspection.composer.selection?.providerId).toBe("claude-code");
   expect(slot.inspection.composer.inputLocked).toBe(false);
-  expect(document.body.textContent).toContain("skipped codex (Weekly limit full");
+  const skipped = slot.getByText("skipped codex");
+  expect(skipped.getAttribute("title")).toContain("codex (Weekly limit full until");
+  expect(document.body.textContent).not.toContain("Weekly limit");
 });
