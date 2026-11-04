@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  availableChoices,
   buildSelection,
+  findExhaustedProviders,
+  skippedProviders,
   describeChoice,
   detachPreset,
   formatOptionSpec,
@@ -203,4 +206,32 @@ test("detachPreset turns sections linked to a preset into one-off copies", () =>
     sec_b: { presetId: "mp_fast" },
     sec_c: { choices: [sol] },
   });
+});
+
+const NOW = Date.parse("2026-11-04T00:00:00.000Z");
+
+test("findExhaustedProviders reports providers with a full window that has not reset", () => {
+  const exhausted = findExhaustedProviders({
+    codex: { status: "ok", windows: [
+      { label: "Five-hour limit", usedPercent: 100, resetsAt: "2026-11-04T05:00:00.000Z" },
+      { label: "Weekly limit", usedPercent: 100, resetsAt: "2026-11-06T00:00:00.000Z" },
+    ] },
+    "claude-code": { status: "ok", windows: [{ label: "Weekly", usedPercent: 99.9, resetsAt: null }] },
+    stale: { status: "ok", windows: [{ label: "Weekly", usedPercent: 100, resetsAt: "2026-11-03T00:00:00.000Z" }] },
+    broken: { status: "error" },
+  }, NOW);
+  assert.deepEqual(exhausted, { codex: { label: "Weekly limit", resetsAt: "2026-11-06T00:00:00.000Z" } });
+});
+
+test("availableChoices drops exhausted providers until their window resets", () => {
+  const exhausted = { codex: { label: "Weekly limit", resetsAt: "2026-11-06T00:00:00.000Z" } };
+  assert.deepEqual(availableChoices([opus, sol], exhausted, NOW), [opus]);
+  assert.deepEqual(skippedProviders([opus, sol], exhausted, NOW), ["codex"]);
+  assert.deepEqual(availableChoices([opus, sol], exhausted, Date.parse("2026-11-06T00:00:01.000Z")), [opus, sol]);
+});
+
+test("availableChoices keeps every live choice when all are exhausted", () => {
+  const exhausted = { codex: { label: "Weekly", resetsAt: null }, "claude-code": { label: "Weekly", resetsAt: null } };
+  assert.deepEqual(availableChoices([opus, sol, { ...opus, weight: 0 }], exhausted, NOW), [opus, sol]);
+  assert.deepEqual(skippedProviders([opus, sol], exhausted, NOW), []);
 });

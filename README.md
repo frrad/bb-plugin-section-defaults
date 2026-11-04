@@ -20,6 +20,15 @@ Lists are usually **model presets**: named, shared lists such as "Smart" or
 the **default** to use it in every section without its own model choice,
 instead of the last-used model. A section can also have its own one-off list.
 
+Providers that are out of subscription capacity are not rolled. If bb's
+provider usage shows any usage window at 100% that hasn't reset yet (e.g.
+Codex's weekly limit), that provider's models are left out of the pick and
+the Re-roll buttons until the window resets, and the banner says which
+provider was skipped. If every model in the list is out of capacity, the pick
+uses all of them as usual. Usage is read from bb at most once a minute. A read
+that fails or takes more than 2 seconds never holds up the composer: the last
+reading is used, or nothing is skipped.
+
 A line above the composer says what was applied, with a **Re-roll** button
 when there are model choices to pick between. You can still change anything
 by hand before sending.

@@ -140,6 +140,80 @@ export function buildSelection(
   return Object.keys(patch).length === 0 ? null : patch;
 }
 
+/** A provider whose subscription has a usage window used up, from bb's usage limits. */
+export interface ExhaustedProvider {
+  /** The full window, e.g. "Weekly limit". */
+  label: string;
+  /** When that window resets (ISO time), or null if bb does not say. */
+  resetsAt: string | null;
+}
+
+/** Provider id → why it is out of capacity. */
+export type ExhaustedProviders = Record<string, ExhaustedProvider>;
+
+/** The parts of bb's `system.usageLimits()` result this plugin reads. */
+export type UsageLimits = Record<
+  string,
+  { status: string; windows?: readonly { label: string; usedPercent: number; resetsAt: string | null }[] }
+>;
+
+/**
+ * Providers with any usage window at 100% that has not reset yet. Of several
+ * full windows, the one that resets last is reported, since that is when the
+ * provider is usable again.
+ */
+export function findExhaustedProviders(usage: UsageLimits, now: number = Date.now()): ExhaustedProviders {
+  const exhausted: ExhaustedProviders = {};
+  for (const [providerId, state] of Object.entries(usage)) {
+    if (state.status !== "ok") continue;
+    for (const window of state.windows ?? []) {
+      if (window.usedPercent < 100) continue;
+      const entry = { label: window.label, resetsAt: window.resetsAt };
+      if (!isExhausted(entry, now)) continue;
+      const previous = exhausted[providerId];
+      if (previous === undefined || resetTime(entry) > resetTime(previous)) exhausted[providerId] = entry;
+    }
+  }
+  return exhausted;
+}
+
+function resetTime(entry: ExhaustedProvider): number {
+  const time = entry.resetsAt === null ? Number.NaN : Date.parse(entry.resetsAt);
+  return Number.isNaN(time) ? Number.POSITIVE_INFINITY : time;
+}
+
+/** False once the window's reset time has passed, even if the usage data is stale. */
+export function isExhausted(entry: ExhaustedProvider | undefined, now: number = Date.now()): boolean {
+  return entry !== undefined && resetTime(entry) > now;
+}
+
+/**
+ * The choices worth rolling: live ones whose provider is not out of capacity.
+ * When every live choice is out of capacity, all of them, so a section still
+ * gets its usual models rather than nothing.
+ */
+export function availableChoices(
+  choices: readonly PresetChoice[],
+  exhausted: ExhaustedProviders,
+  now: number = Date.now(),
+): PresetChoice[] {
+  const live = choices.filter((choice) => choice.weight > 0);
+  const available = live.filter((choice) => !isExhausted(exhausted[choice.providerId], now));
+  return available.length > 0 ? available : live;
+}
+
+/** Providers among `choices` that `availableChoices` skipped. */
+export function skippedProviders(
+  choices: readonly PresetChoice[],
+  exhausted: ExhaustedProviders,
+  now: number = Date.now(),
+): string[] {
+  const available = new Set(availableChoices(choices, exhausted, now));
+  return [...new Set(
+    choices.filter((choice) => choice.weight > 0 && !available.has(choice)).map((choice) => choice.providerId),
+  )];
+}
+
 /** Weighted random pick. `random` returns a number in [0, 1). */
 export function pickChoice(
   choices: readonly PresetChoice[],

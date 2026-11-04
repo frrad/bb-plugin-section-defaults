@@ -10,7 +10,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 const config = {
   sections: [{ id: "section", name: "Test" }], projects: [], remembered: {}, rememberEnabled: true,
-  defaultPresetId: null,
+  defaultPresetId: null, exhaustedProviders: {},
   modelPresets: {}, sectionModels: { section: { choices: [{ providerId: "claude-code", model: "opus", weight: 1 }] } },
 };
 async function mount(state_get: () => unknown) {
@@ -88,4 +88,20 @@ test("a section navigation in the same composer is guarded before the next poll"
   expect(slot.inspection.composer.selection?.model).toBe("opus");
   expect(slot.inspection.composer.inputLocked).toBe(false);
   button.remove();
+});
+
+test("a provider out of capacity is not rolled, and the banner says it was skipped", async () => {
+  const slot = await mount(() => ({
+    ...config,
+    sectionModels: { section: { choices: [
+      { providerId: "codex", model: "sol", weight: 1000 },
+      { providerId: "claude-code", model: "opus", weight: 1 },
+    ] } },
+    exhaustedProviders: { codex: { label: "Weekly limit", resetsAt: "2999-01-01T00:00:00.000Z" } },
+  }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+  expect(slot.inspection.composer.selection?.providerId).toBe("claude-code");
+  expect(slot.inspection.composer.inputLocked).toBe(false);
+  expect(document.body.textContent).toContain("skipped codex (Weekly limit full");
 });
