@@ -10,7 +10,8 @@ weighted random pick between models.
   sections link to and follow when edited, or one-off lists per section. A
   default preset can supply models to every section without its own choice.
   Every new thread picks a model at random by weight, and a **Re-roll**
-  button picks again.
+  button picks again. Providers that are out of subscription capacity (e.g.
+  Codex's weekly limit is used up) are skipped until their limit resets.
 - A settings page that uses bb's own model and permission pickers, and a
   `bb section-defaults` command for the same settings from a shell.
 

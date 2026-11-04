@@ -29,13 +29,17 @@ import { readNavigationKey, readPlacementSectionId } from "./placement.ts";
 import { selectWorktreeBranch, worktreeBranch } from "./worktree-branch.ts";
 import {
   PRESETS_CHANGED,
+  availableChoices,
   buildSelection,
   choiceOdds,
   describeChoice,
   pickChoice,
   resolveSectionModels,
+  skippedProviders,
 } from "./presets.ts";
 import type {
+  ExhaustedProvider,
+  ExhaustedProviders,
   Json,
   ModelPreset,
   ModelPresetConfig,
@@ -83,6 +87,7 @@ interface Config {
   defaultPresetId: string | null;
   remembered: RememberedConfig;
   rememberEnabled: boolean;
+  exhaustedProviders: ExhaustedProviders;
 }
 
 /** Everything the plugin stores, kept current by the server's realtime signal. */
@@ -290,7 +295,7 @@ function SectionPresetBanner() {
         if (saved?.next.token === visit.token) {
           apply(saved.next, saved.patch);
         } else {
-          const choice = models === null ? null : pickChoice(models.choices);
+          const choice = models === null ? null : pickChoice(availableChoices(models.choices, state.exhaustedProviders));
           const patch = buildSelection(last, choice);
           if (patch !== null) apply({ token: visit.token, sectionId: visit.sectionId, choice, restored: last !== undefined }, patch);
         }
@@ -369,9 +374,9 @@ function SectionPresetBanner() {
     const sectionChoices = config === null ? [] :
       resolveSectionModels(config.sectionModels[sectionId], config.modelPresets, config.defaultPresetId)
         ?.choices.filter((choice) => choice.weight > 0) ?? [];
-    const alternatives = failedChoice === null ? [] : sectionChoices.filter(
+    const alternatives = failedChoice === null || config === null ? [] : availableChoices(sectionChoices.filter(
       (choice) => choice.providerId !== failedChoice.providerId || choice.model !== failedChoice.model,
-    );
+    ), config.exhaustedProviders);
     const retry = () => {
       if (entry !== undefined) { entry.job.status = "pending"; entry.job.error = null; }
       refetch();
@@ -420,7 +425,8 @@ function SectionPresetBanner() {
   if (applied === null || applied.sectionId !== sectionId || config === null) return null;
   const models = resolveSectionModels(config.sectionModels[sectionId], config.modelPresets, config.defaultPresetId);
   const sectionName = config.sections.find((section) => section.id === sectionId)?.name ?? "Section";
-  const live = models?.choices.filter((choice) => choice.weight > 0) ?? [];
+  const live = availableChoices(models?.choices ?? [], config.exhaustedProviders);
+  const skipped = applied.choice === null ? [] : skippedProviders(models?.choices ?? [], config.exhaustedProviders);
   const reroll = () => {
     const current = applied.choice;
     const others = live.filter(
@@ -437,7 +443,8 @@ function SectionPresetBanner() {
   const parts = [
     applied.restored ? (applied.choice === null ? "last-used settings" : "last-used workspace") : null,
     models?.presetName ?? null,
-    applied.choice === null || models === null ? null : describeChoice(applied.choice, models.choices),
+    applied.choice === null || models === null ? null : describeChoice(applied.choice, live),
+    skipped.length === 0 ? null : `skipped ${skipped.map((id) => describeExhausted(id, config.exhaustedProviders[id])).join(", ")}`,
   ].filter((part): part is string => part !== null);
   return (
     <div className="flex items-center gap-2 px-1 pb-1 text-xs text-muted-foreground">
@@ -452,6 +459,16 @@ function SectionPresetBanner() {
       ) : null}
     </div>
   );
+}
+
+/** e.g. "codex (Weekly limit full until Tue 9:46 AM)". */
+function describeExhausted(providerId: string, entry: ExhaustedProvider | undefined): string {
+  if (entry === undefined) return providerId;
+  const resets = entry.resetsAt === null ? null : new Date(entry.resetsAt);
+  const until = resets === null || Number.isNaN(resets.getTime()) ? "" : ` until ${resets.toLocaleString(undefined, {
+    weekday: "short", hour: "numeric", minute: "2-digit",
+  })}`;
+  return `${providerId} (${entry.label} full${until})`;
 }
 
 // --- Settings page ---------------------------------------------------------

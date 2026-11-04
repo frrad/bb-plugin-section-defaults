@@ -14,7 +14,9 @@ automatically each time a thread is sent from that composer.
 A section can also choose its model from a weighted list: each entry is a
 provider, model, optional reasoning level, service tier, permission mode,
 and a weight. Each new thread picks one at random by weight, replacing the
-remembered model. The list is either a shared **model preset** (e.g.
+remembered model. Models whose provider is out of subscription capacity
+(any bb usage window at 100% that hasn't reset, e.g. Codex's weekly limit) are
+skipped unless every model in the list is. The list is either a shared **model preset** (e.g.
 "Smart"; sections using it follow edits) or the section's own one-off
 list. A preset can also be the global **default** for sections without their
 own model choice; it replaces their remembered model while leaving their

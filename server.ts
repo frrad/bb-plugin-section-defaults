@@ -12,8 +12,23 @@ import { randomUUID } from "node:crypto";
 import { PluginCliError, cliCommand, defineCli, defineRpcContract } from "@get-bb/plugin-sdk";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { PERMISSION_MODES, PRESETS_CHANGED, detachPreset, formatOptionSpec, parseOptionSpec } from "./presets.ts";
-import type { ModelPreset, ModelPresetConfig, PresetChoice, SectionModels, SectionModelsConfig } from "./presets.ts";
+import {
+  PERMISSION_MODES,
+  PRESETS_CHANGED,
+  detachPreset,
+  findExhaustedProviders,
+  formatOptionSpec,
+  parseOptionSpec,
+} from "./presets.ts";
+import type {
+  ExhaustedProviders,
+  ModelPreset,
+  ModelPresetConfig,
+  PresetChoice,
+  SectionModels,
+  SectionModelsConfig,
+  UsageLimits,
+} from "./presets.ts";
 
 const choiceSchema = z.object({
   providerId: z.string().min(1),
@@ -59,6 +74,8 @@ export const rpcContract = defineRpcContract({
       defaultPresetId: z.string().min(1).nullable(),
       remembered: rememberedConfigSchema,
       rememberEnabled: z.boolean(),
+      /** Providers out of subscription capacity; the composer does not roll them. */
+      exhaustedProviders: z.record(z.string(), z.object({ label: z.string(), resetsAt: z.string().nullable() })),
     }),
   },
   section_models_set: {
@@ -88,6 +105,10 @@ const SECTION_MODELS_KEY = "presets";
 const MODEL_PRESETS_KEY = "modelPresets";
 const DEFAULT_PRESET_KEY = "defaultPresetId";
 const REMEMBERED_KEY = "remembered";
+/** How long one usage reading is reused before asking bb again. */
+const USAGE_TTL_MS = 60_000;
+/** How long the composer's state load waits for usage; after that it uses the last reading. */
+const USAGE_TIMEOUT_MS = 2_000;
 
 export default async function plugin(bb: BbPluginApi): Promise<void> {
   const settings = bb.settings.define({
@@ -163,6 +184,32 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     await write(REMEMBERED_KEY, all);
   }
 
+  // Usage changes slowly and bb caches it per host, so one reading serves every
+  // composer for a minute. A slow or failing read never blocks the composer:
+  // it falls back to the last reading, or to nothing being out of capacity.
+  let usage: { readAt: number; exhausted: ExhaustedProviders } | null = null;
+  let usageRead: Promise<ExhaustedProviders> | null = null;
+  async function readExhaustedProviders(): Promise<ExhaustedProviders> {
+    if (usage !== null && Date.now() - usage.readAt < USAGE_TTL_MS) return usage.exhausted;
+    usageRead ??= Promise.resolve()
+      .then(() => bb.sdk.system.usageLimits())
+      .then((limits) => {
+        const exhausted = findExhaustedProviders(limits as UsageLimits);
+        usage = { readAt: Date.now(), exhausted };
+        return exhausted;
+      })
+      .catch((cause: unknown) => {
+        bb.log.warn(`could not read provider usage: ${cause instanceof Error ? cause.message : String(cause)}`);
+        return usage?.exhausted ?? {};
+      })
+      .finally(() => { usageRead = null; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<ExhaustedProviders>((resolve) => {
+      timer = setTimeout(() => resolve(usage?.exhausted ?? {}), USAGE_TIMEOUT_MS);
+    });
+    return await Promise.race([usageRead, timeout]).finally(() => clearTimeout(timer));
+  }
+
   async function listSections(): Promise<Named[]> {
     return (await bb.sdk.threadSections.list()).map(({ id, name }) => ({ id, name }));
   }
@@ -191,15 +238,19 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     );
 
   bb.rpc.register(rpcContract, {
-    state_get: async () => ({
-      sections: await listSections(),
-      projects: (await bb.sdk.projects.list()).map(({ id, name }) => ({ id, name })),
-      modelPresets: await readModelPresets(),
-      sectionModels: await readSectionModels(),
-      defaultPresetId: await readDefaultPresetId(),
-      remembered: await readRemembered(),
-      rememberEnabled: (await settings.get()).rememberLastUsed,
-    }),
+    state_get: async () => {
+      const exhaustedProviders = readExhaustedProviders(); // in parallel with the reads below
+      return {
+        sections: await listSections(),
+        projects: (await bb.sdk.projects.list()).map(({ id, name }) => ({ id, name })),
+        modelPresets: await readModelPresets(),
+        sectionModels: await readSectionModels(),
+        defaultPresetId: await readDefaultPresetId(),
+        remembered: await readRemembered(),
+        rememberEnabled: (await settings.get()).rememberLastUsed,
+        exhaustedProviders: await exhaustedProviders,
+      };
+    },
     section_models_set: async ({ sectionId, models }) => {
       await setSectionModels(sectionId, models);
       return null;
