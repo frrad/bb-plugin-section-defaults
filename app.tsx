@@ -444,13 +444,23 @@ function SectionPresetBanner() {
     applied.restored ? (applied.choice === null ? "last-used settings" : "last-used workspace") : null,
     models?.presetName ?? null,
     applied.choice === null || models === null ? null : describeChoice(applied.choice, live),
-    skipped.length === 0 ? null : `skipped ${skipped.map((id) => describeExhausted(id, config.exhaustedProviders[id])).join(", ")}`,
   ].filter((part): part is string => part !== null);
   return (
     <div className="flex items-center gap-2 px-1 pb-1 text-xs text-muted-foreground">
       <Icon name="section-defaults/shuffle" className="size-3.5 shrink-0" />
       <span className="min-w-0 truncate">
         {sectionName}: {parts.join(" · ")}
+        {skipped.length === 0 ? null : (
+          <>
+            {" · "}
+            <span
+              className="cursor-help underline decoration-dotted underline-offset-2"
+              title={skipped.map((id) => describeExhausted(id, config.exhaustedProviders[id])).join("\n")}
+            >
+              skipped {skipped.join(", ")}
+            </span>
+          </>
+        )}
       </span>
       {live.length > 1 ? (
         <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={reroll}>
